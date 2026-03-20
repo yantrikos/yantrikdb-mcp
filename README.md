@@ -26,4 +26,6 @@ See [yantrikdb.com/guides/mcp](https://yantrikdb.com/guides/mcp/) for full docum
 
 ## License
 
-AGPL-3.0
+This MCP server is licensed under **MIT** — use it freely in any project.
+
+Note: This package depends on [yantrikdb](https://github.com/yantrikos/yantrikdb) (the cognitive memory engine), which is licensed under **AGPL-3.0**. The AGPL applies to the engine itself — if you modify the engine and distribute it or provide it as a network service, those modifications must also be AGPL-3.0. Using the engine as-is via this MCP server does not trigger AGPL obligations on your code.
