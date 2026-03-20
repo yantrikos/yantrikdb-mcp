@@ -7,7 +7,7 @@ name = "yantrikdb-mcp"
 version = "0.1.0"
 description = "YantrikDB MCP Server — Cognitive memory for AI agents"
 readme = "README.md"
-license = "AGPL-3.0-only"
+license = "MIT"
 requires-python = ">=3.10"
 authors = [
     { name = "Pranab Sarkar", email = "developer@pranab.co.in" },
@@ -16,7 +16,7 @@ keywords = ["ai", "memory", "mcp", "cognitive", "agent", "claude", "cursor"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: GNU Affero General Public License v3",
+    "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
