@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "yantrikdb-mcp"
+version = "0.1.0"
+description = "YantrikDB MCP Server — Cognitive memory for AI agents"
+readme = "README.md"
+license = "AGPL-3.0-only"
+requires-python = ">=3.10"
+authors = [
+    { name = "Pranab Sarkar", email = "developer@pranab.co.in" },
+]
+keywords = ["ai", "memory", "mcp", "cognitive", "agent", "claude", "cursor"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: GNU Affero General Public License v3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "yantrikdb>=0.2.0",
+    "mcp[cli]>=1.2.0",
+    "sentence-transformers>=3.0.0",
+    "click>=8.0.0",
+]
+
+[project.scripts]
+yantrikdb-mcp = "yantrikdb_mcp:main"
+
+[project.urls]
+Homepage = "https://yantrikdb.com"
+Repository = "https://github.com/yantrikos/yantrikdb-mcp"
+Documentation = "https://yantrikdb.com/guides/mcp/"
+Issues = "https://github.com/yantrikos/yantrikdb-mcp/issues"
+
+[tool.setuptools.packages.find]
+where = ["src"]
