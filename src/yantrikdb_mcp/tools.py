@@ -1084,3 +1084,295 @@ def acknowledge_trigger(trigger_id: str, ctx: Context = None) -> str:
     with lock:
         result = db.acknowledge_trigger(trigger_id)
     return json.dumps({"trigger_id": trigger_id, "acknowledged": result})
+
+
+# ── Session Management (V14) ──
+
+
+@mcp.tool()
+def session_start(
+    namespace: str = "default",
+    client_id: str = "default",
+    metadata: dict | None = None,
+    ctx: Context = None,
+) -> str:
+    """Start a new interaction session. Memories recorded during the session
+    are automatically linked to it.
+
+    WHEN TO USE: At the start of a conversation or work session. Only one
+    active session per (namespace, client_id) is allowed.
+
+    Args:
+        namespace: Memory namespace (default: "default").
+        client_id: Identifier for the client/agent (default: "default").
+        metadata: Optional metadata dict (e.g. {"workspace": "myproject"}).
+
+    Returns the session_id.
+    """
+    db, lock = _get_db(ctx)
+    with lock:
+        meta = metadata or {}
+        sid = db.session_start(namespace, client_id, meta)
+    return json.dumps({"session_id": sid})
+
+
+@mcp.tool()
+def session_end(
+    session_id: str,
+    summary: str | None = None,
+    ctx: Context = None,
+) -> str:
+    """End an active session. Computes summary stats (memory count, avg
+    valence, topics, duration).
+
+    WHEN TO USE: At the end of a conversation. The summary is stored and
+    available for future session_awareness triggers.
+
+    Args:
+        session_id: The session ID to end.
+        summary: Optional summary of what happened in this session.
+
+    Returns session stats.
+    """
+    db, lock = _get_db(ctx)
+    with lock:
+        result = db.session_end(session_id, summary)
+    return json.dumps(result)
+
+
+@mcp.tool()
+def session_history(
+    namespace: str = "default",
+    client_id: str = "default",
+    limit: int = 10,
+    ctx: Context = None,
+) -> str:
+    """View past sessions for a client. Shows timing, memory count, topics,
+    and emotional valence for each session.
+
+    WHEN TO USE: To understand interaction history — when was the last session,
+    what was discussed, how did the user feel.
+
+    Args:
+        namespace: Memory namespace.
+        client_id: Client identifier.
+        limit: Max sessions to return.
+
+    Returns list of past sessions.
+    """
+    db, lock = _get_db(ctx)
+    with lock:
+        sessions = db.session_history(namespace, client_id, limit)
+    return json.dumps(sessions)
+
+
+# ── Temporal Queries (V14) ──
+
+
+@mcp.tool()
+def stale_memories(
+    days: float = 30.0,
+    limit: int = 20,
+    namespace: str | None = None,
+    ctx: Context = None,
+) -> str:
+    """Find important memories that haven't been accessed recently.
+
+    WHEN TO USE: During cognitive maintenance — identify knowledge that may be
+    outdated. Good to run periodically or when the user asks "what have I forgotten?"
+
+    Args:
+        days: How many days of inactivity counts as stale.
+        limit: Max results.
+        namespace: Optional namespace filter.
+
+    Returns stale memories ordered by importance.
+    """
+    db, lock = _get_db(ctx)
+    with lock:
+        memories = db.stale(days, limit, namespace)
+    return json.dumps([
+        {"rid": m["rid"], "text": m["text"], "importance": m["importance"],
+         "days_since_access": (time.time() - m.get("last_access", time.time())) / 86400}
+        for m in memories
+    ])
+
+
+@mcp.tool()
+def upcoming_memories(
+    days: float = 7.0,
+    limit: int = 20,
+    namespace: str | None = None,
+    ctx: Context = None,
+) -> str:
+    """Find memories with upcoming due dates (deadlines, reminders, events).
+
+    WHEN TO USE: Proactively at session start to surface what's coming up.
+    Also useful when user asks about their schedule or upcoming events.
+
+    Args:
+        days: Look ahead window in days.
+        limit: Max results.
+        namespace: Optional namespace filter.
+
+    Returns memories due within the specified window, sorted by due date.
+    """
+    db, lock = _get_db(ctx)
+    with lock:
+        memories = db.upcoming(days, limit, namespace)
+    return json.dumps([
+        {"rid": m["rid"], "text": m["text"], "importance": m["importance"],
+         "due_at": m.get("due_at"), "temporal_kind": m.get("temporal_kind")}
+        for m in memories
+    ])
+
+
+# ── Entity Intelligence (V14) ──
+
+
+@mcp.tool()
+def entity_profile(
+    entity: str,
+    days: float = 90.0,
+    namespace: str | None = None,
+    ctx: Context = None,
+) -> str:
+    """Get a rich profile of an entity: mention frequency, valence trends,
+    domains, sessions, and emotional patterns.
+
+    WHEN TO USE: When the user asks about a person, project, or topic.
+    Reveals how deeply the system knows an entity and the emotional context
+    around it.
+
+    Args:
+        entity: Entity name (e.g. "Alice", "ProjectX", "Redis").
+        days: Time window in days for analysis.
+        namespace: Optional namespace filter.
+
+    Returns entity profile with temporal and emotional dimensions.
+    """
+    db, lock = _get_db(ctx)
+    with lock:
+        profile = db.entity_profile(entity, days, namespace)
+    return json.dumps(profile)
+
+
+@mcp.tool()
+def relationship_depth(
+    entity: str,
+    namespace: str | None = None,
+    ctx: Context = None,
+) -> str:
+    """Measure how deeply the system knows an entity — not just mention count,
+    but sessions together, domain breadth, graph connections, and interaction
+    richness.
+
+    WHEN TO USE: To differentiate between "mentioned once" and "deeply known".
+    The depth_score (0.0-1.0) reflects true relationship depth. Use this to
+    calibrate how confidently you speak about an entity.
+
+    Args:
+        entity: Entity name to profile.
+        namespace: Optional namespace filter.
+
+    Returns relationship depth metrics including composite depth_score.
+    """
+    db, lock = _get_db(ctx)
+    with lock:
+        depth = db.relationship_depth(entity, namespace)
+    return json.dumps(depth)
+
+
+# ── Procedural Memory (V14) ──
+
+
+@mcp.tool()
+def learn_procedure(
+    text: str,
+    domain: str = "general",
+    task_context: str = "",
+    effectiveness: float = 0.5,
+    namespace: str = "default",
+    ctx: Context = None,
+) -> str:
+    """Store a learned procedure — what worked in a specific context.
+
+    WHEN TO USE: When you discover an effective approach, strategy, or technique
+    during a task. The engine will surface relevant procedures for similar future
+    tasks. Over time, effective procedures get reinforced and ineffective ones decay.
+
+    EXAMPLES:
+    - "When searching this codebase, the Agent tool with Explore subtype works better than direct Grep for architectural questions"
+    - "For this user, always show code diffs rather than describing changes verbally"
+    - "Breaking large PRs into domain-specific commits gets faster reviews in this repo"
+
+    Args:
+        text: Description of the procedure/strategy.
+        domain: Task domain this applies to.
+        task_context: What kind of task this procedure helps with.
+        effectiveness: How well it worked (0.0-1.0). Higher = more important.
+        namespace: Memory namespace.
+
+    Returns the memory RID.
+    """
+    db, lock = _get_db(ctx)
+    with lock:
+        rid = db.record_procedural(text, None, domain, task_context, effectiveness, namespace)
+    return json.dumps({"rid": rid, "type": "procedural", "effectiveness": effectiveness})
+
+
+@mcp.tool()
+def surface_procedures(
+    query: str,
+    domain: str | None = None,
+    top_k: int = 5,
+    namespace: str | None = None,
+    ctx: Context = None,
+) -> str:
+    """Find learned procedures relevant to the current task.
+
+    WHEN TO USE: At the start of a task, to check if past sessions produced
+    relevant strategies. The engine returns procedures that matched similar
+    contexts, ranked by effectiveness.
+
+    Args:
+        query: Describe what you're about to do.
+        domain: Optional domain filter.
+        top_k: Max procedures to return.
+        namespace: Optional namespace filter.
+
+    Returns relevant procedures with effectiveness scores.
+    """
+    db, lock = _get_db(ctx)
+    with lock:
+        emb = db.embed(query)
+        results = db.surface_procedural(emb, query, domain, top_k, namespace)
+    return json.dumps([
+        {"rid": r["rid"], "text": r["text"], "score": r["score"],
+         "importance": r["importance"], "certainty": r.get("certainty", 0.5)}
+        for r in results
+    ])
+
+
+@mcp.tool()
+def reinforce_procedure(
+    rid: str,
+    outcome: float,
+    ctx: Context = None,
+) -> str:
+    """Update a procedure's effectiveness based on how well it worked.
+
+    WHEN TO USE: After using a surfaced procedure, report whether it was helpful.
+    1.0 = fully successful, 0.5 = partially useful, 0.0 = not helpful at all.
+    This drives adaptive learning — good procedures get stronger over time.
+
+    Args:
+        rid: The procedure's memory RID.
+        outcome: How effective the procedure was (0.0-1.0).
+
+    Returns whether the reinforcement was applied.
+    """
+    db, lock = _get_db(ctx)
+    with lock:
+        result = db.reinforce_procedural(rid, outcome)
+    return json.dumps({"rid": rid, "reinforced": result, "outcome": outcome})
