@@ -813,3 +813,174 @@ def stats(namespace: str | None = None, ctx: Context = None) -> str:
     with lock:
         result = db.stats(namespace=namespace)
     return json.dumps(result)
+
+
+# ── Personality (V13) ──
+
+
+@mcp.tool()
+def personality(recompute: bool = False, ctx: Context = None) -> str:
+    """Get the AI personality profile — trait scores derived from memory patterns.
+
+    WHEN TO USE: When you want to understand or communicate personality traits
+    (warmth, depth, energy, attentiveness) that have emerged from stored memories.
+    Call with recompute=True after significant new memories to refresh traits.
+
+    EXAMPLES:
+    - personality() → current cached profile
+    - personality(recompute=True) → recompute from memory signals then return
+
+    Args:
+        recompute: If True, re-derive traits from memory patterns before returning.
+
+    Returns trait scores (0-1), confidence, and sample counts.
+    """
+    db, lock = _get_db(ctx)
+    with lock:
+        if recompute:
+            profile = db.derive_personality()
+        else:
+            profile = db.get_personality()
+    return json.dumps(profile)
+
+
+@mcp.tool()
+def set_personality(trait_name: str, score: float, ctx: Context = None) -> str:
+    """Manually set a personality trait score.
+
+    WHEN TO USE: When the user explicitly wants to tune the AI personality —
+    e.g., "be warmer" or "be more attentive". Also useful for testing.
+
+    EXAMPLES:
+    - set_personality("warmth", 0.8) → make the AI warmer
+    - set_personality("energy", 0.3) → make the AI calmer
+
+    Args:
+        trait_name: One of: warmth, depth, energy, attentiveness.
+        score: Value between 0.0 and 1.0.
+
+    Returns whether the trait was updated.
+    """
+    db, lock = _get_db(ctx)
+    with lock:
+        updated = db.set_personality_trait(trait_name, score)
+    return json.dumps({"trait": trait_name, "score": score, "updated": updated})
+
+
+# ── Patterns (V13) ──
+
+
+@mcp.tool()
+def patterns(
+    pattern_type: str | None = None,
+    status: str = "active",
+    limit: int = 20,
+    ctx: Context = None,
+) -> str:
+    """Get discovered patterns across memories — co-occurrences, trends, cross-domain links.
+
+    WHEN TO USE: After calling `think`, check what patterns the engine has discovered.
+    Cross-domain patterns reveal surprising connections (e.g., work stress correlating
+    with health entries). Entity bridges show people/concepts that span multiple domains.
+
+    EXAMPLES:
+    - patterns() → all active patterns
+    - patterns(pattern_type="cross_domain") → only cross-domain discoveries
+    - patterns(pattern_type="entity_bridge") → entities bridging domains
+
+    Pattern types: co_occurrence, temporal_cluster, valence_trend, topic_cluster,
+    entity_hub, cross_domain, entity_bridge.
+
+    Args:
+        pattern_type: Filter by type, or None for all.
+        status: Filter by status (active, stale). Default "active".
+        limit: Maximum patterns to return.
+
+    Returns discovered patterns with confidence, evidence, and context.
+    """
+    db, lock = _get_db(ctx)
+    with lock:
+        result = db.get_patterns(
+            pattern_type=pattern_type, status=status, limit=limit
+        )
+    return json.dumps({"count": len(result), "patterns": result})
+
+
+# ── Archive / Hydrate (V13) ──
+
+
+@mcp.tool()
+def archive(rid: str, ctx: Context = None) -> str:
+    """Move a memory to cold storage (archived). Reduces clutter while preserving data.
+
+    WHEN TO USE: When a memory is old or low-relevance but shouldn't be forgotten.
+    Archived memories are excluded from recall but can be hydrated back.
+
+    Args:
+        rid: The memory ID to archive.
+
+    Returns confirmation with the archived memory ID.
+    """
+    db, lock = _get_db(ctx)
+    with lock:
+        db.archive(rid)
+    return json.dumps({"archived": rid, "status": "cold"})
+
+
+@mcp.tool()
+def hydrate(rid: str, ctx: Context = None) -> str:
+    """Restore an archived memory back to active (hot) storage.
+
+    WHEN TO USE: When an archived memory becomes relevant again — user asks about
+    something old, or a pattern links to archived data.
+
+    Args:
+        rid: The memory ID to hydrate.
+
+    Returns confirmation with the restored memory ID.
+    """
+    db, lock = _get_db(ctx)
+    with lock:
+        db.hydrate(rid)
+    return json.dumps({"hydrated": rid, "status": "hot"})
+
+
+# ── Learned Weights (V13) ──
+
+
+@mcp.tool()
+def learned_weights(ctx: Context = None) -> str:
+    """Show how the recall scoring system has adapted from feedback.
+
+    WHEN TO USE: For transparency — understand why certain memories rank higher.
+    Shows the current weights for similarity, decay, recency, and other scoring signals.
+    These weights evolve as you provide recall_feedback.
+
+    Returns scoring weights: w_sim, w_decay, w_recency, gate_tau, alpha_imp,
+    keyword_boost, and the generation count (how many learning iterations).
+    """
+    db, lock = _get_db(ctx)
+    with lock:
+        weights = db.learned_weights()
+    return json.dumps(weights)
+
+
+# ── Trigger Lifecycle (V13) ──
+
+
+@mcp.tool()
+def acknowledge_trigger(trigger_id: str, ctx: Context = None) -> str:
+    """Mark a trigger as acknowledged — you've seen it and may act on it.
+
+    WHEN TO USE: After surfacing a trigger to the user. Completes the trigger
+    lifecycle: pending → delivered → acknowledged → acted/dismissed.
+
+    Args:
+        trigger_id: The trigger ID to acknowledge.
+
+    Returns whether the trigger was acknowledged.
+    """
+    db, lock = _get_db(ctx)
+    with lock:
+        result = db.acknowledge_trigger(trigger_id)
+    return json.dumps({"trigger_id": trigger_id, "acknowledged": result})

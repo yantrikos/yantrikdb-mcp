@@ -59,6 +59,10 @@ Call `relate` when you learn about entity relationships:
 - Call `think` at the end of long conversations to consolidate and detect conflicts.
 - If `think` surfaces conflicts, resolve them or ask the user.
 - If recall returns low-confidence results, try `recall_refine` with a rephrased query.
+- After `think`, call `patterns` to check for cross-domain discoveries and entity bridges.
+- Call `personality` to understand emergent trait scores; call with recompute=True after big sessions.
+- Call `acknowledge_trigger` after surfacing triggers to the user.
+- Use `archive` for old memories cluttering recall; `hydrate` to restore them when relevant again.
 """
 
 
