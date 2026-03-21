@@ -1376,3 +1376,79 @@ def reinforce_procedure(
     with lock:
         result = db.reinforce_procedural(rid, outcome)
     return json.dumps({"rid": rid, "reinforced": result, "outcome": outcome})
+
+
+# ── Substitution Category Tools (V14) ──
+
+
+@mcp.tool()
+def reclassify_conflict(
+    conflict_id: str,
+    new_type: str,
+    ctx: Context = None,
+) -> str:
+    """Reclassify a conflict and teach the engine about substitution patterns.
+
+    WHEN TO USE: When the engine misclassified a conflict type. For example, if
+    "PostgreSQL" vs "MySQL" was flagged as an entity substitution but should be
+    a preference, reclassify it. The engine learns from this: it adds the tokens
+    to the appropriate substitution category so future conflicts are caught
+    automatically.
+
+    Args:
+        conflict_id: The conflict to reclassify.
+        new_type: The correct conflict type — one of "identity_fact", "preference", "temporal".
+
+    Returns the reclassification result including any newly learned category members.
+    """
+    db, lock = _get_db(ctx)
+    with lock:
+        result = db.reclassify_conflict(conflict_id, new_type)
+    return json.dumps(result)
+
+
+@mcp.tool()
+def substitution_categories(
+    ctx: Context = None,
+) -> str:
+    """List all substitution categories the engine knows about.
+
+    WHEN TO USE: To inspect what semantic categories the engine uses for
+    conflict detection. Shows databases, cloud providers, languages, etc.
+    with member counts. Useful for understanding what the engine can detect
+    and what gaps exist.
+
+    Returns a list of categories with their member counts and status.
+    """
+    db, lock = _get_db(ctx)
+    with lock:
+        cats = db.substitution_categories()
+    return json.dumps(cats)
+
+
+@mcp.tool()
+def learn_category_members(
+    category_name: str,
+    members: list[list],
+    source: str = "llm_suggested",
+    ctx: Context = None,
+) -> str:
+    """Teach the engine new members of a substitution category.
+
+    WHEN TO USE: When you identify tokens that belong to an existing category
+    but aren't recognized yet. For example, adding "tidb" to the "databases"
+    category. LLM-suggested members start at low confidence and only affect
+    conflict detection after user confirmation.
+
+    Args:
+        category_name: The category to add members to (e.g. "databases").
+        members: List of [token, confidence] pairs. Example: [["tidb", 0.35], ["surrealdb", 0.35]].
+        source: Origin of the suggestion — "llm_suggested", "user_confirmed", or "seed".
+
+    Returns the number of new members added.
+    """
+    db, lock = _get_db(ctx)
+    member_tuples = [(m[0], float(m[1])) for m in members]
+    with lock:
+        count = db.learn_category_members(category_name, member_tuples, source)
+    return json.dumps({"category": category_name, "new_members": count, "source": source})
