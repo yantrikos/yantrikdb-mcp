@@ -48,7 +48,7 @@ Run the benchmark yourself: `python benchmarks/bench_token_savings.py`
 
 ## Tools
 
-17 tools available to your agent:
+24 tools available to your agent:
 
 | Tool | Purpose |
 |---|---|
@@ -67,6 +67,13 @@ Run the benchmark yourself: `python benchmarks/bench_token_savings.py`
 | `conflict_resolve` | Resolve a contradiction |
 | `recall_feedback` | Improve retrieval quality over time |
 | `triggers` | Get proactive insights and warnings |
+| `acknowledge_trigger` | Mark a trigger as seen/acted on |
+| `personality` | Get emergent AI personality traits |
+| `set_personality` | Manually tune a personality trait |
+| `patterns` | View discovered cross-domain patterns |
+| `archive` | Move memory to cold storage |
+| `hydrate` | Restore archived memory to active |
+| `learned_weights` | See adapted recall scoring weights |
 | `health_check` | Verify the server is operational |
 | `stats` | Get memory engine statistics |
 

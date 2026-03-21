@@ -14,12 +14,6 @@ def _get_db(ctx: Context):
     return lc["db"], lc["lock"]
 
 
-def _get_embedder(ctx: Context):
-    """Get the sentence-transformers embedder from lifespan context."""
-    lc = ctx.request_context.lifespan_context
-    return lc["embedder"]
-
-
 # ── Core Memory Tools ──
 
 
@@ -68,6 +62,20 @@ def remember(
 
     Returns the memory ID (rid) of the stored memory.
     """
+    # Input validation
+    if not text or not text.strip():
+        return json.dumps({"error": "text must be non-empty"})
+    text = text.strip()
+
+    # Clamp numeric fields to valid ranges
+    importance = max(0.0, min(1.0, importance))
+    valence = max(-1.0, min(1.0, valence))
+    certainty = max(0.0, min(1.0, certainty))
+
+    valid_types = ("semantic", "episodic", "procedural")
+    if memory_type not in valid_types:
+        return json.dumps({"error": f"memory_type must be one of {valid_types}, got '{memory_type}'"})
+
     db, lock = _get_db(ctx)
     with lock:
         rid = db.record(
@@ -383,15 +391,21 @@ def correct(
 
     Returns the original and corrected memory IDs.
     """
+    if not new_text or not new_text.strip():
+        return json.dumps({"error": "new_text must be non-empty"})
+
     db, lock = _get_db(ctx)
-    with lock:
-        result = db.correct(
-            rid,
-            new_text,
-            new_importance=new_importance,
-            new_valence=new_valence,
-            correction_note=correction_note,
-        )
+    try:
+        with lock:
+            result = db.correct(
+                rid,
+                new_text,
+                new_importance=new_importance,
+                new_valence=new_valence,
+                correction_note=correction_note,
+            )
+    except Exception as e:
+        return json.dumps({"error": str(e), "rid": rid})
     return json.dumps({
         "original_rid": result["original_rid"],
         "corrected_rid": result["corrected_rid"],
@@ -677,15 +691,24 @@ def conflict_resolve(
 
     Returns the resolution result.
     """
+    valid_strategies = ("keep_a", "keep_b", "keep_both", "merge")
+    if strategy not in valid_strategies:
+        return json.dumps({"error": f"strategy must be one of {valid_strategies}, got '{strategy}'"})
+    if strategy == "merge" and (not new_text or not new_text.strip()):
+        return json.dumps({"error": "new_text is required for 'merge' strategy"})
+
     db, lock = _get_db(ctx)
-    with lock:
-        result = db.resolve_conflict(
-            conflict_id,
-            strategy,
-            winner_rid=winner_rid,
-            new_text=new_text,
-            resolution_note=resolution_note,
-        )
+    try:
+        with lock:
+            result = db.resolve_conflict(
+                conflict_id,
+                strategy,
+                winner_rid=winner_rid,
+                new_text=new_text,
+                resolution_note=resolution_note,
+            )
+    except Exception as e:
+        return json.dumps({"error": str(e), "conflict_id": conflict_id})
     return json.dumps({
         "conflict_id": result["conflict_id"],
         "strategy": result["strategy"],
@@ -923,7 +946,9 @@ def archive(rid: str, ctx: Context = None) -> str:
     """
     db, lock = _get_db(ctx)
     with lock:
-        db.archive(rid)
+        archived = db.archive(rid)
+    if not archived:
+        return json.dumps({"error": f"Memory '{rid}' not found or already archived"})
     return json.dumps({"archived": rid, "status": "cold"})
 
 
@@ -941,7 +966,9 @@ def hydrate(rid: str, ctx: Context = None) -> str:
     """
     db, lock = _get_db(ctx)
     with lock:
-        db.hydrate(rid)
+        hydrated = db.hydrate(rid)
+    if not hydrated:
+        return json.dumps({"error": f"Memory '{rid}' not found or already hot"})
     return json.dumps({"hydrated": rid, "status": "hot"})
 
 
