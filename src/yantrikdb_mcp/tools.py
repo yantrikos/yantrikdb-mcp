@@ -364,6 +364,79 @@ def forget(rid: str, ctx: Context = None) -> str:
 
 
 @mcp.tool()
+def bulk_forget(rids: list[str], ctx: Context = None) -> str:
+    """Forget multiple memories at once.
+
+    WHEN TO USE: Cleanup after testing, removing a batch of outdated memories,
+    or clearing a namespace. More efficient than calling forget() in a loop.
+
+    Args:
+        rids: List of memory IDs to forget.
+
+    Returns count of successfully forgotten memories.
+    """
+    if not rids:
+        return json.dumps({"error": "rids list must not be empty"})
+    db, lock = _get_db(ctx)
+    forgotten = 0
+    with lock:
+        for rid in rids:
+            if db.forget(rid):
+                forgotten += 1
+    return json.dumps({"forgotten": forgotten, "total": len(rids)})
+
+
+@mcp.tool()
+def list_memories(
+    limit: int = 50,
+    offset: int = 0,
+    domain: str | None = None,
+    memory_type: str | None = None,
+    namespace: str | None = None,
+    sort_by: str = "created_at",
+    ctx: Context = None,
+) -> str:
+    """Browse stored memories without a search query. Useful for auditing what's stored.
+
+    WHEN TO USE: When you need to see what memories exist, audit stored data,
+    or browse memories by domain/type without a specific search query.
+
+    Args:
+        limit: Maximum memories to return (default 50, max 200).
+        offset: Skip first N results for pagination.
+        domain: Filter by domain (e.g., "work", "preference", "people").
+        memory_type: Filter by type: "semantic", "episodic", "procedural".
+        namespace: Filter by namespace.
+        sort_by: Sort order — "created_at" (newest first), "importance" (highest first), "last_access" (most recent first).
+
+    Returns a paginated list of memories with their metadata.
+    """
+    limit = max(1, min(200, limit))
+    offset = max(0, offset)
+
+    db, lock = _get_db(ctx)
+    with lock:
+        result = db.list_memories(
+            limit=limit, offset=offset, domain=domain,
+            memory_type=memory_type, namespace=namespace, sort_by=sort_by,
+        )
+    items = [
+        {
+            "rid": m["rid"], "type": m["type"], "text": m["text"],
+            "importance": m["importance"], "valence": m["valence"],
+            "domain": m["domain"], "source": m["source"],
+            "created_at": m["created_at"], "last_access": m["last_access"],
+            "namespace": m["namespace"],
+        }
+        for m in result["memories"]
+    ]
+    return json.dumps({
+        "count": len(items), "total": result["total"],
+        "offset": result["offset"], "memories": items,
+    })
+
+
+@mcp.tool()
 def correct(
     rid: str,
     new_text: str,
