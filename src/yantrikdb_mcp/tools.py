@@ -1,6 +1,7 @@
 """MCP tool implementations for YantrikDB cognitive memory engine."""
 
 import json
+import time
 
 from mcp.server.fastmcp import Context
 
@@ -13,36 +14,57 @@ def _get_db(ctx: Context):
     return lc["db"], lc["lock"]
 
 
+def _get_embedder(ctx: Context):
+    """Get the sentence-transformers embedder from lifespan context."""
+    lc = ctx.request_context.lifespan_context
+    return lc["embedder"]
+
+
 # ── Core Memory Tools ──
 
 
 @mcp.tool()
-def memory_record(
+def remember(
     text: str,
-    memory_type: str = "episodic",
+    memory_type: str = "semantic",
     importance: float = 0.5,
+    domain: str = "general",
+    source: str = "user",
     valence: float = 0.0,
     metadata: dict | None = None,
     namespace: str = "default",
     certainty: float = 0.8,
-    domain: str = "general",
-    source: str = "user",
     emotional_state: str | None = None,
     ctx: Context = None,
 ) -> str:
-    """Store a new memory in the cognitive memory engine.
+    """Store a new memory in persistent cognitive memory.
+
+    WHEN TO USE: Call this proactively whenever the conversation reveals something
+    worth remembering across sessions — decisions, preferences, facts about people,
+    project context, or corrections. Do NOT store ephemeral task details, code
+    snippets, or anything derivable from git/files.
+
+    EXAMPLES:
+    - User says "I'm switching to Neovim" → remember("User is switching to Neovim as their primary editor", domain="preference", importance=0.7)
+    - Decision made: "We'll use PostgreSQL for the new service" → remember("Decision: use PostgreSQL for the new microservice", domain="architecture", importance=0.8)
+    - User shares: "Alice is our DevOps lead" → remember("Alice is the DevOps lead on the team", domain="people", importance=0.7)
+
+    IMPORTANCE GUIDE:
+    - 0.8-1.0: Critical decisions, strong preferences, key people
+    - 0.5-0.7: Useful context, project details, minor preferences
+    - 0.3-0.5: Nice-to-know, background information
 
     Args:
-        text: The memory content to store.
-        memory_type: One of 'episodic' (events), 'semantic' (facts), 'procedural' (how-to).
-        importance: How important this memory is (0.0 to 1.0). Higher = decays slower.
+        text: The memory content. Be specific and searchable — "User prefers dark mode in VS Code" not "likes dark".
+        memory_type: "semantic" (facts/knowledge), "episodic" (events/experiences), "procedural" (how-to/processes).
+        importance: How important (0.0-1.0). Higher = remembered longer.
+        domain: Topic area — "work", "preference", "architecture", "people", "infrastructure", "health", "finance", "general".
+        source: Who provided this — "user" (user said it), "inference" (you deduced it), "document" (from a file), "system".
         valence: Emotional tone (-1.0 negative to 1.0 positive). 0.0 is neutral.
-        metadata: Optional key-value metadata (e.g. {"source": "conversation", "topic": "work"}).
-        namespace: Memory namespace for isolation (default: "default").
-        certainty: How confident the agent was when storing (0.0 to 1.0).
-        domain: Topic domain (work, health, family, finance, hobby, travel, general, etc.).
-        source: Who/what provided this memory (user, system, document, inference).
-        emotional_state: Richer emotion label: joy, sadness, anger, fear, surprise, neutral, etc.
+        metadata: Optional key-value pairs for extra context (e.g. {"project": "acme", "sprint": "23"}).
+        namespace: Memory namespace for isolation (default: "default"). Use for per-project memory separation.
+        certainty: How confident you are in this memory (0.0-1.0). Lower for inferences.
+        emotional_state: Emotion label if relevant — joy, frustration, excitement, concern, neutral.
 
     Returns the memory ID (rid) of the stored memory.
     """
@@ -64,33 +86,98 @@ def memory_record(
 
 
 @mcp.tool()
-def memory_recall(
+def bulk_remember(
+    memories: list[dict],
+    namespace: str = "default",
+    ctx: Context = None,
+) -> str:
+    """Store multiple memories at once — efficient for conversation summaries or batch imports.
+
+    WHEN TO USE: At the end of a conversation when you have several things to remember,
+    or when processing a document that contains multiple facts. More efficient than
+    calling remember() in a loop.
+
+    EXAMPLE:
+    bulk_remember(memories=[
+        {"text": "User prefers Python 3.12", "domain": "preference", "importance": 0.7},
+        {"text": "Project deadline is March 30", "domain": "work", "importance": 0.9},
+        {"text": "Alice handles frontend, Bob handles backend", "domain": "people", "importance": 0.6}
+    ])
+
+    Args:
+        memories: List of memory objects. Each must have "text" and can optionally include:
+            memory_type (default "semantic"), importance (default 0.5), domain (default "general"),
+            source (default "user"), valence (default 0.0), metadata (default {}),
+            certainty (default 0.8), emotional_state (default None).
+        namespace: Namespace for all memories in this batch.
+
+    Returns list of memory IDs created.
+    """
+    db, lock = _get_db(ctx)
+    results = []
+    with lock:
+        for mem in memories:
+            rid = db.record(
+                mem["text"],
+                memory_type=mem.get("memory_type", "semantic"),
+                importance=mem.get("importance", 0.5),
+                valence=mem.get("valence", 0.0),
+                metadata=mem.get("metadata", {}),
+                namespace=namespace,
+                certainty=mem.get("certainty", 0.8),
+                domain=mem.get("domain", "general"),
+                source=mem.get("source", "user"),
+                emotional_state=mem.get("emotional_state"),
+            )
+            results.append(rid)
+    return json.dumps({"rids": results, "count": len(results), "status": "recorded"})
+
+
+@mcp.tool()
+def recall(
     query: str,
     top_k: int = 10,
     memory_type: str | None = None,
-    include_consolidated: bool = False,
-    expand_entities: bool = True,
-    namespace: str | None = None,
     domain: str | None = None,
     source: str | None = None,
+    namespace: str | None = None,
+    include_consolidated: bool = False,
+    expand_entities: bool = True,
     ctx: Context = None,
 ) -> str:
     """Search memories by semantic similarity to a natural language query.
 
+    WHEN TO USE:
+    - At conversation start: recall a summary of the user's first message to load context.
+    - When the user references past decisions, people, preferences, or "last time we...".
+    - When you're unsure about something the user assumes you know.
+    - When the user asks "do you remember..." or "what did we decide about...".
+
+    EXAMPLES:
+    - User asks about a project → recall("project X architecture decisions")
+    - User mentions a person → recall("Alice role and responsibilities")
+    - User references a preference → recall("user editor preferences and tooling setup")
+    - Filter to work context only → recall("deployment process", domain="work")
+
+    TIPS:
+    - Use natural language queries, not keywords — "what database did we choose" works better than "database choice".
+    - If results have low confidence, try recall_refine with a rephrased query.
+    - Check the 'hints' field in results — it suggests follow-up queries.
+
     Uses multi-signal scoring: vector similarity, temporal decay, recency,
-    importance, and optional knowledge graph expansion.
+    importance weighting, and knowledge graph expansion.
 
     Args:
-        query: Natural language search query.
-        top_k: Maximum number of results (default 10).
-        memory_type: Filter by type ('episodic', 'semantic', 'procedural'). None for all.
-        include_consolidated: Whether to include consolidated (merged) memories.
-        expand_entities: Whether to use knowledge graph to find related memories.
+        query: Natural language search query. Be descriptive.
+        top_k: Maximum results to return (default 10). Use 3-5 for focused queries, 10-20 for broad exploration.
+        memory_type: Filter: "semantic", "episodic", or "procedural". None for all types.
+        domain: Filter by domain: "work", "preference", "architecture", "people", etc. None for all.
+        source: Filter by source: "user", "inference", "document", "system". None for all.
         namespace: Filter by namespace. None returns all namespaces.
-        domain: Filter by topic domain (work, health, family, etc.). None for all.
-        source: Filter by memory source (user, system, document, inference). None for all.
+        include_consolidated: Include merged/consolidated memories (default False).
+        expand_entities: Use knowledge graph to find related memories (default True). Disable for faster, narrower search.
 
-    Returns matching memories ranked by relevance with score breakdowns.
+    Returns memories ranked by relevance, with confidence score and retrieval hints.
     """
     db, lock = _get_db(ctx)
     with lock:
@@ -104,7 +191,6 @@ def memory_recall(
             domain=domain,
             source=source,
         )
-    # Convert PyO3 dicts to plain dicts for JSON serialization
     items = []
     for r in response["results"]:
         items.append({
@@ -146,7 +232,7 @@ def memory_recall(
 
 
 @mcp.tool()
-def memory_recall_refine(
+def recall_refine(
     original_query: str,
     refinement_text: str,
     original_rids: list[str] | None = None,
@@ -156,18 +242,21 @@ def memory_recall_refine(
     source: str | None = None,
     ctx: Context = None,
 ) -> str:
-    """Refine a previous recall with a follow-up query.
+    """Refine a previous recall with a follow-up query when results were unsatisfying.
 
-    Use this when recall returned low-confidence results and hints suggested
-    rephrasing. Combines the original query embedding with the refinement
-    embedding (weighted: 0.4 original + 0.6 refinement) and excludes
-    already-seen memory IDs.
+    WHEN TO USE: When recall() returned low-confidence results (< 0.5) or the hints
+    suggested rephrasing. Combines the original and refined queries (weighted 0.4/0.6)
+    and excludes already-seen results.
+
+    EXAMPLE:
+    - First: recall("database choice") → low confidence
+    - Then: recall_refine("database choice", "PostgreSQL vs MySQL decision for new service", original_rids=["rid1", "rid2"])
 
     Args:
         original_query: The original search query text.
-        refinement_text: The follow-up/clarifying query text.
-        original_rids: Memory IDs from the first recall to exclude from results.
-        top_k: Maximum number of results (default 10).
+        refinement_text: The improved/clarifying query text.
+        original_rids: Memory IDs from the first recall to exclude.
+        top_k: Maximum results (default 10).
         namespace: Filter by namespace.
         domain: Filter by domain.
         source: Filter by source.
@@ -176,7 +265,6 @@ def memory_recall_refine(
     """
     db, lock = _get_db(ctx)
     with lock:
-        # Get embeddings for both queries
         original_emb = db.embed(original_query)
         response = db.recall_refine(
             original_query_embedding=original_emb,
@@ -214,13 +302,16 @@ def memory_recall_refine(
 
 
 @mcp.tool()
-def memory_get(rid: str, ctx: Context = None) -> str:
+def get_memory(rid: str, ctx: Context = None) -> str:
     """Get a specific memory by its ID.
+
+    WHEN TO USE: When you have a memory ID (from recall results, conflict details,
+    or trigger source_rids) and need the full record.
 
     Args:
         rid: The memory ID to retrieve.
 
-    Returns the full memory record including text, type, importance, timestamps, and metadata.
+    Returns the full memory record with all fields.
     """
     db, lock = _get_db(ctx)
     with lock:
@@ -246,8 +337,12 @@ def memory_get(rid: str, ctx: Context = None) -> str:
 
 
 @mcp.tool()
-def memory_forget(rid: str, ctx: Context = None) -> str:
+def forget(rid: str, ctx: Context = None) -> str:
     """Permanently forget (tombstone) a memory.
+
+    WHEN TO USE: When the user explicitly asks to forget something, or when a memory
+    is clearly wrong and correction isn't appropriate (e.g., it was about the wrong person entirely).
+    Prefer `correct` over `forget` when the memory just needs updating.
 
     Args:
         rid: The memory ID to forget.
@@ -261,7 +356,7 @@ def memory_forget(rid: str, ctx: Context = None) -> str:
 
 
 @mcp.tool()
-def memory_correct(
+def correct(
     rid: str,
     new_text: str,
     new_importance: float | None = None,
@@ -269,17 +364,22 @@ def memory_correct(
     correction_note: str | None = None,
     ctx: Context = None,
 ) -> str:
-    """Correct an existing memory with updated information.
+    """Correct an existing memory — tombstones the old one and creates a corrected version.
 
-    The original memory is tombstoned and a new corrected version is created,
-    preserving the history. Entity relationships are transferred to the new memory.
+    WHEN TO USE: When the user corrects a fact you recalled from memory.
+    - User: "Actually, we're using Python 3.12, not 3.11" → correct the memory.
+    - User: "No, Alice is the backend lead, not frontend" → correct the memory.
+    Preserves history and transfers entity relationships to the new memory.
+
+    EXAMPLE:
+    correct(rid="abc123", new_text="Project uses Python 3.12", correction_note="User corrected version from 3.11 to 3.12")
 
     Args:
         rid: The memory ID to correct.
         new_text: The corrected text content.
-        new_importance: Optional new importance score (0.0 to 1.0).
-        new_valence: Optional new emotional valence (-1.0 to 1.0).
-        correction_note: Optional note explaining why the correction was made.
+        new_importance: Optional updated importance (0.0-1.0).
+        new_valence: Optional updated valence (-1.0 to 1.0).
+        correction_note: Why the correction was made — helps with audit trail.
 
     Returns the original and corrected memory IDs.
     """
@@ -299,11 +399,48 @@ def memory_correct(
     })
 
 
+@mcp.tool()
+def update_importance(
+    rid: str,
+    importance: float,
+    ctx: Context = None,
+) -> str:
+    """Adjust the importance of an existing memory.
+
+    WHEN TO USE: When you realize a memory is more or less important than originally scored.
+    - A previously minor preference turns out to be critical → increase importance.
+    - A "decision" turns out to be tentative → decrease importance.
+
+    Args:
+        rid: The memory ID to update.
+        importance: New importance score (0.0-1.0).
+
+    Returns confirmation of the update.
+    """
+    db, lock = _get_db(ctx)
+    with lock:
+        mem = db.get(rid)
+        if mem is None:
+            return json.dumps({"error": "Memory not found", "rid": rid})
+        result = db.correct(
+            rid,
+            mem["text"],
+            new_importance=importance,
+            correction_note=f"Importance adjusted from {mem['importance']} to {importance}",
+        )
+    return json.dumps({
+        "rid": result["corrected_rid"],
+        "old_importance": mem["importance"],
+        "new_importance": importance,
+        "status": "updated",
+    })
+
+
 # ── Entity / Graph Tools ──
 
 
 @mcp.tool()
-def entity_relate(
+def relate(
     source: str,
     target: str,
     relationship: str = "related_to",
@@ -312,11 +449,24 @@ def entity_relate(
 ) -> str:
     """Create a relationship between two entities in the knowledge graph.
 
+    WHEN TO USE: When the conversation reveals relationships between people,
+    projects, technologies, organizations, or concepts. Building the knowledge
+    graph improves recall — memories connected to entities you search for
+    get boosted in results.
+
+    EXAMPLES:
+    - "Alice manages the backend team" → relate("Alice", "backend team", "manages")
+    - "Project X uses React and TypeScript" → relate("Project X", "React", "uses") + relate("Project X", "TypeScript", "uses")
+    - "Bob reports to Alice" → relate("Bob", "Alice", "reports_to")
+    - "Redis is our cache layer" → relate("Redis", "infrastructure", "serves_as", weight=0.9)
+
+    NAMING: Use consistent, capitalized entity names — "Alice" not "alice", "Project X" not "project x".
+
     Args:
-        source: Source entity name (e.g. "Alice", "Python", "project_x").
+        source: Source entity name (e.g. "Alice", "Project X", "PostgreSQL").
         target: Target entity name.
-        relationship: Relationship type (e.g. "works_at", "knows", "likes", "related_to").
-        weight: Relationship strength (0.0 to 1.0).
+        relationship: Relationship type — "works_at", "manages", "reports_to", "uses", "knows", "related_to", etc.
+        weight: Relationship strength (0.0-1.0). 1.0 = definite, 0.5 = possible.
 
     Returns the edge ID of the created relationship.
     """
@@ -328,7 +478,13 @@ def entity_relate(
 
 @mcp.tool()
 def entity_edges(entity: str, ctx: Context = None) -> str:
-    """Get all relationships for an entity in the knowledge graph.
+    """Get all relationships for an entity from the knowledge graph.
+
+    WHEN TO USE: When you want to understand everything connected to a person,
+    project, or concept. Useful for building context about an entity before
+    responding.
+
+    EXAMPLE: entity_edges("Alice") → shows all of Alice's relationships (manages, works_at, knows, etc.)
 
     Args:
         entity: The entity name to look up.
@@ -351,32 +507,73 @@ def entity_edges(entity: str, ctx: Context = None) -> str:
     return json.dumps({"entity": entity, "count": len(items), "edges": items})
 
 
+@mcp.tool()
+def search_entities(
+    pattern: str,
+    limit: int = 20,
+    ctx: Context = None,
+) -> str:
+    """Search for entities in the knowledge graph by name pattern.
+
+    WHEN TO USE: When you want to find entities matching a partial name, or browse
+    what entities exist. Useful before calling entity_edges() or relate().
+
+    EXAMPLES:
+    - search_entities("Ali") → finds "Alice", "Alibaba", etc.
+    - search_entities("project") → finds all project entities
+
+    Args:
+        pattern: Search pattern (case-insensitive substring match).
+        limit: Maximum results (default 20).
+
+    Returns matching entity names with their edge counts.
+    """
+    db, lock = _get_db(ctx)
+    with lock:
+        entities = db.search_entities(pattern=pattern, limit=limit)
+    items = [
+        {
+            "name": e["name"],
+            "type": e.get("entity_type"),
+            "mention_count": e.get("mention_count", 0),
+            "first_seen": e.get("first_seen"),
+            "last_seen": e.get("last_seen"),
+        }
+        for e in entities
+    ]
+    return json.dumps({"pattern": pattern, "count": len(items), "entities": items})
+
+
 # ── Cognition Tools ──
 
 
 @mcp.tool()
-def memory_think(
+def think(
     run_consolidation: bool = True,
     run_conflict_scan: bool = True,
     run_pattern_mining: bool = True,
     ctx: Context = None,
 ) -> str:
-    """Run the cognitive maintenance loop on the memory store.
+    """Run the cognitive maintenance loop — consolidate, detect conflicts, mine patterns.
 
-    This performs background processing that keeps the memory system healthy:
-    - Checks for decaying memories that need review
-    - Consolidates similar memories into summaries
-    - Scans for contradictions between memories
-    - Mines for recurring patterns across memories
+    WHEN TO USE:
+    - At the end of a long conversation with many new memories stored.
+    - When you suspect contradictory memories exist.
+    - Periodically to keep the memory system healthy and efficient.
+    - When recall returns many similar/overlapping memories (consolidation needed).
 
-    Call this periodically or when you want the memory system to 'reflect'.
+    WHAT IT DOES:
+    - Consolidation: Merges highly similar memories into summaries, reducing noise.
+    - Conflict scan: Finds contradictions (e.g., "uses Postgres" vs "uses MySQL").
+    - Pattern mining: Detects recurring themes and trends across memories.
+    - Trigger generation: Creates actionable alerts (decaying memories, insights).
 
     Args:
-        run_consolidation: Whether to merge similar memories (default True).
-        run_conflict_scan: Whether to scan for contradictions (default True).
-        run_pattern_mining: Whether to detect patterns (default True).
+        run_consolidation: Merge similar memories (default True).
+        run_conflict_scan: Find contradictions (default True).
+        run_pattern_mining: Detect patterns (default True).
 
-    Returns a summary of what the cognition loop found and did.
+    Returns a summary: consolidations made, conflicts found, patterns detected, and triggers.
     """
     db, lock = _get_db(ctx)
     config = {
@@ -409,25 +606,32 @@ def memory_think(
 
 
 @mcp.tool()
-def conflict_list(
+def conflicts(
     status: str | None = None,
     limit: int = 10,
     ctx: Context = None,
 ) -> str:
     """List memory conflicts (contradictions) that need resolution.
 
-    Conflicts are detected when the memory system finds contradictory information,
-    such as two memories stating different facts about the same entity.
+    WHEN TO USE:
+    - After `think` reports conflicts_found > 0.
+    - When a user says something that contradicts what you recall.
+    - Proactively check after storing memories that might conflict with existing ones.
+
+    EXAMPLE: A conflict might look like:
+    - Memory A: "Team uses PostgreSQL for the API database"
+    - Memory B: "Team decided to switch to MySQL for the API"
+    → Resolve by asking the user which is current, then use conflict_resolve.
 
     Args:
-        status: Filter by status ('open', 'resolved', 'dismissed'). Default shows all.
-        limit: Maximum number of conflicts to return (default 10).
+        status: Filter: "open", "resolved", "dismissed". None for all.
+        limit: Maximum conflicts to return (default 10).
 
-    Returns conflicts with their IDs, types, priorities, and the conflicting memories.
+    Returns conflicts with IDs, types, priorities, and the conflicting memories.
     """
     db, lock = _get_db(ctx)
     with lock:
-        conflicts = db.get_conflicts(status=status, limit=limit)
+        conflict_list = db.get_conflicts(status=status, limit=limit)
     items = [
         {
             "conflict_id": c["conflict_id"],
@@ -439,7 +643,7 @@ def conflict_list(
             "entity": c["entity"],
             "detection_reason": c["detection_reason"],
         }
-        for c in conflicts
+        for c in conflict_list
     ]
     return json.dumps({"count": len(items), "conflicts": items})
 
@@ -455,13 +659,21 @@ def conflict_resolve(
 ) -> str:
     """Resolve a memory conflict using a strategy.
 
+    WHEN TO USE: After reviewing a conflict from `conflicts` and determining
+    the correct resolution — either by checking with the user or by inference.
+
+    STRATEGIES:
+    - "keep_a": Memory A is correct, tombstone B.
+    - "keep_b": Memory B is correct, tombstone A.
+    - "keep_both": Both are valid (not actually conflicting), mark resolved.
+    - "merge": Combine into a new memory with new_text.
+
     Args:
         conflict_id: The conflict ID to resolve.
-        strategy: One of 'keep_a' (keep memory A), 'keep_b' (keep memory B),
-                  'keep_both' (keep both, mark as non-conflicting), 'merge' (combine into one).
+        strategy: One of "keep_a", "keep_b", "keep_both", "merge".
         winner_rid: For keep_a/keep_b, which memory wins (optional, inferred from strategy).
-        new_text: For 'merge' strategy, the merged text content.
-        resolution_note: Optional note explaining the resolution.
+        new_text: For "merge" strategy, the combined text.
+        resolution_note: Why this resolution was chosen.
 
     Returns the resolution result.
     """
@@ -487,7 +699,7 @@ def conflict_resolve(
 
 
 @mcp.tool()
-def memory_recall_feedback(
+def recall_feedback(
     rid: str,
     feedback: str,
     query_text: str | None = None,
@@ -495,19 +707,20 @@ def memory_recall_feedback(
     rank_at_retrieval: int | None = None,
     ctx: Context = None,
 ) -> str:
-    """Provide feedback on a recall result for adaptive learning.
+    """Provide feedback on a recall result to improve future retrieval.
 
-    Call this when you know a returned memory was relevant or irrelevant.
-    After enough feedback (20+), the engine learns optimal scoring weights.
+    WHEN TO USE: When you can determine a recalled memory was clearly relevant
+    or clearly irrelevant to what you needed. After ~20 feedback signals, the
+    engine adapts its scoring weights automatically.
 
     Args:
         rid: The memory ID to provide feedback on.
-        feedback: 'relevant' or 'irrelevant'.
-        query_text: The original query text (optional, helps learning).
-        score_at_retrieval: The score the memory received (optional).
-        rank_at_retrieval: The rank position (optional).
+        feedback: "relevant" or "irrelevant".
+        query_text: The original query (helps learning).
+        score_at_retrieval: The score the memory received.
+        rank_at_retrieval: The rank position in results.
 
-    Returns confirmation of recorded feedback.
+    Returns confirmation.
     """
     db, lock = _get_db(ctx)
     with lock:
@@ -525,21 +738,23 @@ def memory_recall_feedback(
 
 
 @mcp.tool()
-def trigger_list(limit: int = 10, ctx: Context = None) -> str:
-    """Get pending proactive triggers from the memory system.
+def triggers(limit: int = 10, ctx: Context = None) -> str:
+    """Get pending proactive triggers — insights, warnings, and suggestions from the memory system.
 
-    Triggers are generated by memory_think() and represent insights, warnings,
-    or suggestions such as: decaying important memories, consolidation opportunities,
-    detected patterns, or relationship insights.
+    WHEN TO USE: After calling `think`, check triggers for actionable items like:
+    - Important memories that are decaying and need reinforcement
+    - Consolidation opportunities (many similar memories)
+    - Detected patterns across memories
+    - Relationship insights from the knowledge graph
 
     Args:
-        limit: Maximum number of triggers to return (default 10).
+        limit: Maximum triggers to return (default 10).
 
     Returns pending triggers sorted by urgency.
     """
     db, lock = _get_db(ctx)
     with lock:
-        triggers = db.get_pending_triggers(limit=limit)
+        trigger_list = db.get_pending_triggers(limit=limit)
     items = [
         {
             "trigger_id": t["trigger_id"],
@@ -549,26 +764,52 @@ def trigger_list(limit: int = 10, ctx: Context = None) -> str:
             "suggested_action": t["suggested_action"],
             "source_rids": t["source_rids"],
         }
-        for t in triggers
+        for t in trigger_list
     ]
     return json.dumps({"count": len(items), "triggers": items})
 
 
-# ── Stats ──
+# ── Health & Stats ──
 
 
 @mcp.tool()
-def memory_stats(namespace: str | None = None, ctx: Context = None) -> str:
-    """Get current memory engine statistics.
+def health_check(ctx: Context = None) -> str:
+    """Verify that the YantrikDB memory system is operational.
+
+    WHEN TO USE: At the start of a session if you're unsure the memory server
+    is working, or to diagnose issues when other tools fail.
+
+    Returns server status, database path, memory counts, and uptime.
+    """
+    db, lock = _get_db(ctx)
+    t0 = time.time()
+    with lock:
+        stats = db.stats()
+    latency_ms = round((time.time() - t0) * 1000, 1)
+    return json.dumps({
+        "status": "ok",
+        "latency_ms": latency_ms,
+        "active_memories": stats.get("active_memories", 0),
+        "total_entities": stats.get("entities", 0),
+        "total_edges": stats.get("edges", 0),
+        "open_conflicts": stats.get("open_conflicts", 0),
+    })
+
+
+@mcp.tool()
+def stats(namespace: str | None = None, ctx: Context = None) -> str:
+    """Get detailed memory engine statistics.
+
+    WHEN TO USE: When you want to understand the state of the memory system —
+    how many memories exist, how many are active vs archived, conflict counts, etc.
 
     Args:
-        namespace: Filter stats to a specific namespace. None for global stats.
+        namespace: Filter to a specific namespace. None for global stats.
 
-    Returns counts of active, consolidated, tombstoned, and archived memories,
-    entity and edge counts, open conflicts, pending triggers, active patterns,
-    and internal index sizes.
+    Returns comprehensive statistics: memory counts by status, entity/edge counts,
+    conflicts, triggers, patterns, and index sizes.
     """
     db, lock = _get_db(ctx)
     with lock:
-        stats = db.stats(namespace=namespace)
-    return json.dumps(stats)
+        result = db.stats(namespace=namespace)
+    return json.dumps(result)
