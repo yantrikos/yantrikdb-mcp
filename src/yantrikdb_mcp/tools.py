@@ -1452,3 +1452,25 @@ def learn_category_members(
     with lock:
         count = db.learn_category_members(category_name, member_tuples, source)
     return json.dumps({"category": category_name, "new_members": count, "source": source})
+
+
+@mcp.tool()
+def reset_category(
+    category_name: str,
+    ctx: Context = None,
+) -> str:
+    """Reset a substitution category to its seed state, removing all learned members.
+
+    WHEN TO USE: When a category has been contaminated with junk tokens from
+    bad reclassifications. This removes all non-seed members and restores the
+    category to its original bootstrap state.
+
+    Args:
+        category_name: The category to reset (e.g. "editors_tools").
+
+    Returns the number of members removed.
+    """
+    db, lock = _get_db(ctx)
+    with lock:
+        removed = db.reset_category_to_seed(category_name)
+    return json.dumps({"category": category_name, "members_removed": removed})
