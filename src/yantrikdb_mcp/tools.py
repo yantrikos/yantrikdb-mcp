@@ -595,6 +595,33 @@ def entity_edges(entity: str, ctx: Context = None) -> str:
 
 
 @mcp.tool()
+def link_memory_entity(
+    rid: str,
+    entity: str,
+    ctx: Context = None,
+) -> str:
+    """Manually link a memory to an entity in the knowledge graph.
+
+    WHEN TO USE: When a memory is about an entity but wasn't auto-linked.
+    This strengthens graph-based recall — when recall expands entities,
+    linked memories get boosted.
+
+    Args:
+        rid: The memory ID to link.
+        entity: The entity name to link it to.
+
+    Returns whether the link was created.
+    """
+    db, lock = _get_db(ctx)
+    try:
+        with lock:
+            db.link_memory_entity(rid, entity)
+        return json.dumps({"rid": rid, "entity": entity, "linked": True})
+    except Exception as e:
+        return json.dumps({"error": str(e), "rid": rid, "entity": entity})
+
+
+@mcp.tool()
 def search_entities(
     pattern: str,
     limit: int = 20,
@@ -694,16 +721,18 @@ def think(
 
 @mcp.tool()
 def conflicts(
+    conflict_id: str | None = None,
     status: str | None = None,
     limit: int = 10,
     ctx: Context = None,
 ) -> str:
-    """List memory conflicts (contradictions) that need resolution.
+    """List memory conflicts or get a single conflict by ID.
 
     WHEN TO USE:
     - After `think` reports conflicts_found > 0.
     - When a user says something that contradicts what you recall.
     - Proactively check after storing memories that might conflict with existing ones.
+    - Pass conflict_id to get full details of a specific conflict.
 
     EXAMPLE: A conflict might look like:
     - Memory A: "Team uses PostgreSQL for the API database"
@@ -711,12 +740,21 @@ def conflicts(
     → Resolve by asking the user which is current, then use conflict_resolve.
 
     Args:
+        conflict_id: Get a single conflict by ID. If provided, other filters are ignored.
         status: Filter: "open", "resolved", "dismissed". None for all.
         limit: Maximum conflicts to return (default 10).
 
     Returns conflicts with IDs, types, priorities, and the conflicting memories.
     """
     db, lock = _get_db(ctx)
+
+    if conflict_id:
+        with lock:
+            c = db.get_conflict(conflict_id)
+        if not c:
+            return json.dumps({"error": f"Conflict not found: {conflict_id}"})
+        return json.dumps(c)
+
     with lock:
         conflict_list = db.get_conflicts(status=status, limit=limit)
     items = [
@@ -754,17 +792,18 @@ def conflict_resolve(
     - "keep_b": Memory B is correct, tombstone A.
     - "keep_both": Both are valid (not actually conflicting), mark resolved.
     - "merge": Combine into a new memory with new_text.
+    - "dismiss": False positive — not a real conflict. Dismisses without resolution.
 
     Args:
         conflict_id: The conflict ID to resolve.
-        strategy: One of "keep_a", "keep_b", "keep_both", "merge".
+        strategy: One of "keep_a", "keep_b", "keep_both", "merge", "dismiss".
         winner_rid: For keep_a/keep_b, which memory wins (optional, inferred from strategy).
         new_text: For "merge" strategy, the combined text.
         resolution_note: Why this resolution was chosen.
 
     Returns the resolution result.
     """
-    valid_strategies = ("keep_a", "keep_b", "keep_both", "merge")
+    valid_strategies = ("keep_a", "keep_b", "keep_both", "merge", "dismiss")
     if strategy not in valid_strategies:
         return json.dumps({"error": f"strategy must be one of {valid_strategies}, got '{strategy}'"})
     if strategy == "merge" and (not new_text or not new_text.strip()):
@@ -772,6 +811,10 @@ def conflict_resolve(
 
     db, lock = _get_db(ctx)
     try:
+        if strategy == "dismiss":
+            with lock:
+                result = db.dismiss_conflict(conflict_id, note=resolution_note)
+            return json.dumps({"conflict_id": conflict_id, "strategy": "dismiss", "dismissed": True, "note": resolution_note})
         with lock:
             result = db.resolve_conflict(
                 conflict_id,
@@ -834,8 +877,13 @@ def recall_feedback(
 
 
 @mcp.tool()
-def triggers(limit: int = 10, ctx: Context = None) -> str:
-    """Get pending proactive triggers — insights, warnings, and suggestions from the memory system.
+def triggers(
+    limit: int = 10,
+    include_history: bool = False,
+    trigger_type: str | None = None,
+    ctx: Context = None,
+) -> str:
+    """Get proactive triggers — insights, warnings, and suggestions from the memory system.
 
     WHEN TO USE: After calling `think`, check triggers for actionable items like:
     - Important memories that are decaying and need reinforcement
@@ -845,20 +893,27 @@ def triggers(limit: int = 10, ctx: Context = None) -> str:
 
     Args:
         limit: Maximum triggers to return (default 10).
+        include_history: If True, return past (acknowledged/acted/dismissed) triggers instead of pending.
+        trigger_type: Filter by trigger type (e.g. "conflict", "decay", "consolidation"). None for all.
 
-    Returns pending triggers sorted by urgency.
+    Returns triggers sorted by urgency (pending) or recency (history).
     """
     db, lock = _get_db(ctx)
-    with lock:
-        trigger_list = db.get_pending_triggers(limit=limit)
+    if include_history:
+        with lock:
+            trigger_list = db.get_trigger_history(trigger_type=trigger_type, limit=limit)
+    else:
+        with lock:
+            trigger_list = db.get_pending_triggers(limit=limit)
     items = [
         {
             "trigger_id": t["trigger_id"],
             "trigger_type": t["trigger_type"],
-            "urgency": t["urgency"],
-            "reason": t["reason"],
-            "suggested_action": t["suggested_action"],
-            "source_rids": t["source_rids"],
+            "urgency": t.get("urgency"),
+            "reason": t.get("reason"),
+            "suggested_action": t.get("suggested_action"),
+            "source_rids": t.get("source_rids"),
+            "status": t.get("status"),
         }
         for t in trigger_list
     ]
@@ -893,7 +948,7 @@ def health_check(ctx: Context = None) -> str:
 
 
 @mcp.tool()
-def stats(namespace: str | None = None, ctx: Context = None) -> str:
+def stats(namespace: str | None = None, include_procedural: bool = False, ctx: Context = None) -> str:
     """Get detailed memory engine statistics.
 
     WHEN TO USE: When you want to understand the state of the memory system —
@@ -901,6 +956,7 @@ def stats(namespace: str | None = None, ctx: Context = None) -> str:
 
     Args:
         namespace: Filter to a specific namespace. None for global stats.
+        include_procedural: If True, also include procedural memory statistics.
 
     Returns comprehensive statistics: memory counts by status, entity/edge counts,
     conflicts, triggers, patterns, and index sizes.
@@ -908,6 +964,8 @@ def stats(namespace: str | None = None, ctx: Context = None) -> str:
     db, lock = _get_db(ctx)
     with lock:
         result = db.stats(namespace=namespace)
+        if include_procedural:
+            result["procedural"] = db.procedural_stats(namespace=namespace)
     return json.dumps(result)
 
 
@@ -1069,21 +1127,42 @@ def learned_weights(ctx: Context = None) -> str:
 
 
 @mcp.tool()
-def acknowledge_trigger(trigger_id: str, ctx: Context = None) -> str:
-    """Mark a trigger as acknowledged — you've seen it and may act on it.
+def acknowledge_trigger(
+    trigger_id: str,
+    action: str = "acknowledge",
+    ctx: Context = None,
+) -> str:
+    """Update a trigger's lifecycle state.
 
-    WHEN TO USE: After surfacing a trigger to the user. Completes the trigger
+    WHEN TO USE: After surfacing a trigger to the user. Actions follow the
     lifecycle: pending → delivered → acknowledged → acted/dismissed.
 
-    Args:
-        trigger_id: The trigger ID to acknowledge.
+    ACTIONS:
+    - "acknowledge": You've seen the trigger and may act on it.
+    - "deliver": Mark as shown to the user (before they respond).
+    - "act": Mark as acted upon — the suggested action was taken.
+    - "dismiss": Dismiss as irrelevant or not actionable.
 
-    Returns whether the trigger was acknowledged.
+    Args:
+        trigger_id: The trigger ID.
+        action: One of "acknowledge", "deliver", "act", "dismiss" (default: "acknowledge").
+
+    Returns the trigger state update result.
     """
+    valid_actions = ("acknowledge", "deliver", "act", "dismiss")
+    if action not in valid_actions:
+        return json.dumps({"error": f"action must be one of {valid_actions}, got '{action}'"})
+
     db, lock = _get_db(ctx)
+    action_map = {
+        "acknowledge": db.acknowledge_trigger,
+        "deliver": db.deliver_trigger,
+        "act": db.act_on_trigger,
+        "dismiss": db.dismiss_trigger,
+    }
     with lock:
-        result = db.acknowledge_trigger(trigger_id)
-    return json.dumps({"trigger_id": trigger_id, "acknowledged": result})
+        result = action_map[action](trigger_id)
+    return json.dumps({"trigger_id": trigger_id, "action": action, "result": result})
 
 
 # ── Session Management (V14) ──
@@ -1118,23 +1197,31 @@ def session_start(
 
 @mcp.tool()
 def session_end(
-    session_id: str,
+    session_id: str | None = None,
     summary: str | None = None,
+    abandon_stale_hours: float | None = None,
     ctx: Context = None,
 ) -> str:
-    """End an active session. Computes summary stats (memory count, avg
-    valence, topics, duration).
+    """End an active session or clean up stale sessions.
 
     WHEN TO USE: At the end of a conversation. The summary is stored and
-    available for future session_awareness triggers.
+    available for future session_awareness triggers. Use abandon_stale_hours
+    to clean up orphaned sessions (e.g., from crashes).
 
     Args:
-        session_id: The session ID to end.
+        session_id: The session ID to end. Required unless using abandon_stale_hours.
         summary: Optional summary of what happened in this session.
+        abandon_stale_hours: If set, abandon all sessions older than this many hours instead. session_id is ignored.
 
-    Returns session stats.
+    Returns session stats or count of abandoned sessions.
     """
     db, lock = _get_db(ctx)
+    if abandon_stale_hours is not None:
+        with lock:
+            count = db.session_abandon_stale(max_age_hours=abandon_stale_hours)
+        return json.dumps({"abandoned_sessions": count, "max_age_hours": abandon_stale_hours})
+    if not session_id:
+        return json.dumps({"error": "session_id is required unless using abandon_stale_hours"})
     with lock:
         result = db.session_end(session_id, summary)
     return json.dumps(result)
@@ -1145,22 +1232,28 @@ def session_history(
     namespace: str = "default",
     client_id: str = "default",
     limit: int = 10,
+    active_only: bool = False,
     ctx: Context = None,
 ) -> str:
-    """View past sessions for a client. Shows timing, memory count, topics,
-    and emotional valence for each session.
+    """View past sessions or check for an active session.
 
     WHEN TO USE: To understand interaction history — when was the last session,
-    what was discussed, how did the user feel.
+    what was discussed, how did the user feel. Use active_only=True to check
+    if there's a current running session.
 
     Args:
         namespace: Memory namespace.
         client_id: Client identifier.
         limit: Max sessions to return.
+        active_only: If True, return only the current active session (or null if none).
 
-    Returns list of past sessions.
+    Returns list of past sessions, or the active session details.
     """
     db, lock = _get_db(ctx)
+    if active_only:
+        with lock:
+            active = db.active_session(namespace, client_id)
+        return json.dumps({"active_session": active})
     with lock:
         sessions = db.session_history(namespace, client_id, limit)
     return json.dumps(sessions)
@@ -1409,18 +1502,26 @@ def reclassify_conflict(
 
 @mcp.tool()
 def substitution_categories(
+    category_name: str | None = None,
     ctx: Context = None,
 ) -> str:
-    """List all substitution categories the engine knows about.
+    """List substitution categories or view members of a specific category.
 
     WHEN TO USE: To inspect what semantic categories the engine uses for
     conflict detection. Shows databases, cloud providers, languages, etc.
-    with member counts. Useful for understanding what the engine can detect
-    and what gaps exist.
+    Pass category_name to see all members (tokens) in that category with
+    their confidence scores and sources.
 
-    Returns a list of categories with their member counts and status.
+    Args:
+        category_name: If provided, return members of this category instead of the category list.
+
+    Returns a list of categories with member counts, or members of a specific category.
     """
     db, lock = _get_db(ctx)
+    if category_name:
+        with lock:
+            members = db.substitution_members(category_name)
+        return json.dumps({"category": category_name, "count": len(members), "members": members})
     with lock:
         cats = db.substitution_categories()
     return json.dumps(cats)
@@ -1474,3 +1575,42 @@ def reset_category(
     with lock:
         removed = db.reset_category_to_seed(category_name)
     return json.dumps({"category": category_name, "members_removed": removed})
+
+
+@mcp.tool()
+def maintenance(
+    action: str,
+    ctx: Context = None,
+) -> str:
+    """Run maintenance operations on the memory engine.
+
+    WHEN TO USE: Periodically or when recall quality degrades. These are
+    background operations that rebuild indexes or fix missing links.
+
+    ACTIONS:
+    - "backfill_entities": Scan memories and create missing memory↔entity links.
+    - "rebuild_vec_index": Rebuild the vector similarity index.
+    - "rebuild_graph_index": Rebuild the knowledge graph index.
+
+    Args:
+        action: One of "backfill_entities", "rebuild_vec_index", "rebuild_graph_index".
+
+    Returns the result of the maintenance operation.
+    """
+    valid_actions = ("backfill_entities", "rebuild_vec_index", "rebuild_graph_index")
+    if action not in valid_actions:
+        return json.dumps({"error": f"action must be one of {valid_actions}, got '{action}'"})
+
+    db, lock = _get_db(ctx)
+    t0 = time.time()
+    with lock:
+        if action == "backfill_entities":
+            result = db.backfill_memory_entities()
+        elif action == "rebuild_vec_index":
+            db.rebuild_vec_index()
+            result = "ok"
+        elif action == "rebuild_graph_index":
+            db.rebuild_graph_index()
+            result = "ok"
+    elapsed_ms = round((time.time() - t0) * 1000, 1)
+    return json.dumps({"action": action, "result": result, "elapsed_ms": elapsed_ms})

@@ -48,7 +48,7 @@ Run the benchmark yourself: `python benchmarks/bench_token_savings.py`
 
 ## Tools
 
-24 tools available to your agent:
+43 tools available to your agent:
 
 | Tool | Purpose |
 |---|---|
@@ -56,26 +56,45 @@ Run the benchmark yourself: `python benchmarks/bench_token_savings.py`
 | `recall` | Search memories by semantic similarity |
 | `recall_refine` | Refine a low-confidence recall |
 | `bulk_remember` | Store multiple memories at once |
+| `bulk_forget` | Tombstone multiple memories at once |
 | `forget` | Tombstone a memory |
+| `get_memory` | Retrieve a single memory by ID |
+| `list_memories` | List memories with filters |
 | `correct` | Fix an incorrect memory (preserves history) |
 | `update_importance` | Adjust memory importance |
 | `relate` | Create entity relationships |
 | `entity_edges` | Get all relationships for an entity |
+| `link_memory_entity` | Manually link a memory to an entity |
 | `search_entities` | Find entities by name pattern |
+| `entity_profile` | Temporal profile with valence trends |
+| `relationship_depth` | Measure depth of relationship knowledge |
 | `think` | Run consolidation + conflict detection + pattern mining |
-| `conflicts` | List detected contradictions |
-| `conflict_resolve` | Resolve a contradiction |
+| `conflicts` | List or get specific contradictions |
+| `conflict_resolve` | Resolve or dismiss a contradiction |
+| `reclassify_conflict` | Reclassify and teach substitution patterns |
 | `recall_feedback` | Improve retrieval quality over time |
-| `triggers` | Get proactive insights and warnings |
-| `acknowledge_trigger` | Mark a trigger as seen/acted on |
+| `triggers` | Get proactive insights, warnings, and history |
+| `acknowledge_trigger` | Update trigger lifecycle (acknowledge/dismiss/act) |
 | `personality` | Get emergent AI personality traits |
 | `set_personality` | Manually tune a personality trait |
 | `patterns` | View discovered cross-domain patterns |
 | `archive` | Move memory to cold storage |
 | `hydrate` | Restore archived memory to active |
 | `learned_weights` | See adapted recall scoring weights |
+| `substitution_categories` | Inspect or drill into conflict detection categories |
+| `learn_category_members` | Teach new members to a category |
+| `reset_category` | Reset a contaminated category to seed |
+| `session_start` | Start an interaction session |
+| `session_end` | End session or clean up stale sessions |
+| `session_history` | View past sessions or check active session |
+| `stale_memories` | Find important memories not accessed recently |
+| `upcoming_memories` | Find memories with approaching deadlines |
+| `learn_procedure` | Store a learned strategy/procedure |
+| `surface_procedures` | Find relevant procedures |
+| `reinforce_procedure` | Update procedure effectiveness |
+| `maintenance` | Rebuild indexes and backfill entity links |
 | `health_check` | Verify the server is operational |
-| `stats` | Get memory engine statistics |
+| `stats` | Get memory engine statistics (with procedural) |
 
 See [yantrikdb.com/guides/mcp](https://yantrikdb.com/guides/mcp/) for full documentation.
 
