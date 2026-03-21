@@ -24,7 +24,7 @@ Add to your MCP client config:
 
 That's it. The agent auto-recalls context, auto-remembers decisions, and auto-detects contradictions — no prompting needed.
 
-## Why Not Just Use CLAUDE.md?
+## Why Not File-Based Memory?
 
 File-based memory (CLAUDE.md, memory files) loads **everything** into context every conversation. YantrikDB recalls only what's relevant.
 
