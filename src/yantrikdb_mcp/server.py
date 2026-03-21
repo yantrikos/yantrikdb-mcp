@@ -37,10 +37,10 @@ Proactively call `remember` whenever you encounter:
 - **Important facts** the user shares about themselves → semantic, importance 0.7-0.9
 
 ## Auto-relate (knowledge graph)
-Call `relate` when you learn about entity relationships:
-- "Alice works at Acme" → relate("Alice", "Acme", "works_at")
-- "Project X uses React" → relate("Project X", "React", "uses")
-- "Bob reports to Alice" → relate("Bob", "Alice", "reports_to")
+Call `graph` with action="relate" when you learn about entity relationships:
+- "Alice works at Acme" → graph(action="relate", entity="Alice", target="Acme", relationship="works_at")
+- "Project X uses React" → graph(action="relate", entity="Project X", target="React", relationship="uses")
+- "Bob reports to Alice" → graph(action="relate", entity="Bob", target="Alice", relationship="reports_to")
 
 ## What NOT to remember
 - Ephemeral task details ("run this test", "fix this line")
@@ -57,12 +57,11 @@ Call `relate` when you learn about entity relationships:
 
 ## Cognitive maintenance
 - Call `think` at the end of long conversations to consolidate and detect conflicts.
-- If `think` surfaces conflicts, resolve them or ask the user.
-- If recall returns low-confidence results, try `recall_refine` with a rephrased query.
-- After `think`, call `patterns` to check for cross-domain discoveries and entity bridges.
-- Call `personality` to understand emergent trait scores; call with recompute=True after big sessions.
-- Call `acknowledge_trigger` after surfacing triggers to the user.
-- Use `archive` for old memories cluttering recall; `hydrate` to restore them when relevant again.
+- If `think` surfaces conflicts, use `conflict(action="resolve", ...)` or ask the user.
+- If recall returns low-confidence results, use `recall(query="...", refine_from="original query")`.
+- Call `personality(recompute=True)` after big sessions to refresh trait scores.
+- Use `trigger(action="acknowledge", ...)` after surfacing triggers to the user.
+- Use `memory(action="archive", ...)` for old memories cluttering recall; `memory(action="hydrate", ...)` to restore.
 """
 
 
