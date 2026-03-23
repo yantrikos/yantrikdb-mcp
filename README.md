@@ -24,6 +24,45 @@ Add to your MCP client config:
 
 That's it. The agent auto-recalls context, auto-remembers decisions, and auto-detects contradictions — no prompting needed.
 
+### Remote Server Mode
+
+Run as a shared server accessible from multiple machines:
+
+```bash
+# Generate a secure API key
+export YANTRIKDB_API_KEY=$(python -c "import secrets; print(secrets.token_urlsafe(32))")
+
+# Start SSE server
+yantrikdb-mcp --transport sse --port 8420
+```
+
+Connect clients to the remote server:
+
+```json
+{
+  "mcpServers": {
+    "yantrikdb": {
+      "type": "sse",
+      "url": "http://your-server:8420/sse",
+      "headers": {
+        "Authorization": "Bearer YOUR_API_KEY"
+      }
+    }
+  }
+}
+```
+
+Supports `sse` and `streamable-http` transports. Bearer token auth via `YANTRIKDB_API_KEY` env var.
+
+### Environment Variables
+
+| Variable | Default | Description |
+|---|---|---|
+| `YANTRIKDB_DB_PATH` | `~/.yantrikdb/memory.db` | Database file path |
+| `YANTRIKDB_EMBEDDING_MODEL` | `all-MiniLM-L6-v2` | Sentence transformer model |
+| `YANTRIKDB_EMBEDDING_DIM` | `384` | Embedding dimension |
+| `YANTRIKDB_API_KEY` | *(none)* | Bearer token for network transports |
+
 ## Why Not File-Based Memory?
 
 File-based memory (CLAUDE.md, memory files) loads **everything** into context every conversation. YantrikDB recalls only what's relevant.
@@ -57,7 +96,7 @@ Run the benchmark yourself: `python benchmarks/bench_token_savings.py`
 | `forget` | single / batch | Tombstone memories |
 | `correct` | — | Fix incorrect memory (preserves history) |
 | `think` | — | Consolidation + conflict detection + pattern mining |
-| `memory` | get / list / update_importance / archive / hydrate | Manage individual memories |
+| `memory` | get / list / search / update_importance / archive / hydrate | Manage individual memories + keyword search |
 | `graph` | relate / edges / link / search / profile / depth | Knowledge graph operations |
 | `conflict` | list / get / resolve / reclassify | Handle contradictions and teach substitution patterns |
 | `trigger` | pending / history / acknowledge / deliver / act / dismiss | Proactive insights and warnings |
