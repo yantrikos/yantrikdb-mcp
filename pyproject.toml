@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "yantrikdb-mcp"
-version = "0.4.3"
+version = "0.4.4"
 description = "YantrikDB MCP Server — Cognitive memory for AI agents"
 readme = "README.md"
 license = "MIT"
@@ -25,9 +25,15 @@ classifiers = [
 dependencies = [
     "yantrikdb>=0.3.0",
     "mcp[cli]>=1.2.0",
-    "sentence-transformers>=3.0.0",
+    "onnxruntime>=1.17.0",
+    "tokenizers>=0.15.0",
+    "huggingface-hub>=0.20.0",
+    "numpy>=1.24.0",
     "click>=8.0.0",
 ]
+
+[project.optional-dependencies]
+torch = ["sentence-transformers>=3.0.0"]
 
 [project.scripts]
 yantrikdb-mcp = "yantrikdb_mcp:main"

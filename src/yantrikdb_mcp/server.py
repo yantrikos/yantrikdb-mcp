@@ -93,9 +93,9 @@ class _LazyDB:
         with self._init_lock:
             if self._db is not None:
                 return  # another thread beat us
-            from sentence_transformers import SentenceTransformer
-
             from yantrikdb import YantrikDB
+
+            from .embedder import load_embedder
 
             db_path = os.environ.get("YANTRIKDB_DB_PATH", str(Path.home() / ".yantrikdb" / "memory.db"))
             model_name = os.environ.get("YANTRIKDB_EMBEDDING_MODEL", "all-MiniLM-L6-v2")
@@ -103,9 +103,8 @@ class _LazyDB:
             Path(db_path).parent.mkdir(parents=True, exist_ok=True)
 
             t0 = time.time()
-            log.info("Loading embedding model: %s", model_name)
-            embedder = SentenceTransformer(model_name)
-            log.info("Model loaded in %.1fs", time.time() - t0)
+            embedder = load_embedder(model_name)
+            embedding_dim = embedder.dim() if hasattr(embedder, 'dim') and callable(embedder.dim) else embedding_dim
 
             log.info("Opening YantrikDB at: %s (dim=%d)", db_path, embedding_dim)
             self._db = YantrikDB(db_path=db_path, embedding_dim=embedding_dim, embedder=embedder)
