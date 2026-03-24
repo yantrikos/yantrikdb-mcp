@@ -2,6 +2,8 @@
 
 Cognitive memory for AI agents. Works with Claude Code, Cursor, Windsurf, and any MCP-compatible client.
 
+**Website:** [yantrikdb.com](https://yantrikdb.com) · **Docs:** [yantrikdb.com/guides/mcp](https://yantrikdb.com/guides/mcp/) · **GitHub:** [yantrikos/yantrikdb-mcp](https://github.com/yantrikos/yantrikdb-mcp)
+
 ## Install
 
 ```bash
