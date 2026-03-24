@@ -306,25 +306,29 @@ def think(
     run_conflict_scan: bool = True,
     run_pattern_mining: bool = False,
     consolidation_time_window_days: float = 7.0,
-    consolidation_limit: int = 100,
+    consolidation_limit: int = 5,
     ctx: Context = None,
 ) -> str:
-    """Run cognitive maintenance — consolidate, detect conflicts, mine patterns.
+    """Run incremental cognitive maintenance — processes a small batch per call.
+
+    DESIGNED TO BE CALLED OFTEN: Each call processes ~5 memories (configurable).
+    Running regularly (e.g. at end of conversation) gradually maintains the
+    entire database without blocking. Safe to call frequently.
 
     WHEN TO USE:
-    - End of long conversations with many new memories.
+    - End of conversations with new memories stored.
     - When you suspect contradictions exist.
     - Periodically to keep memory healthy.
 
     Args:
-        run_consolidation: Merge similar memories.
-        run_conflict_scan: Detect contradictions.
-        run_pattern_mining: Mine cross-domain patterns (slow on large DBs,
-            default off — enable explicitly for deep analysis).
+        run_consolidation: Merge similar memories (default on).
+        run_conflict_scan: Detect contradictions (default on).
+        run_pattern_mining: Mine cross-domain patterns (default off, slow).
         consolidation_time_window_days: Only consolidate memories within this
-            window (default 7 days). Keeps think() fast on large databases.
-        consolidation_limit: Max memories to consider for consolidation
-            (default 100). Prevents O(n²) blowup on large databases.
+            window (default 7 days).
+        consolidation_limit: Batch size — max memories to process per call
+            (default 5). Keep small for fast returns. Run think() multiple
+            times to process more.
 
     Returns consolidation count, conflicts found, patterns, and triggers.
     """
