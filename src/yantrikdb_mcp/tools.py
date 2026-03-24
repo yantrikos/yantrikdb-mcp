@@ -304,7 +304,9 @@ def correct(
 def think(
     run_consolidation: bool = True,
     run_conflict_scan: bool = True,
-    run_pattern_mining: bool = True,
+    run_pattern_mining: bool = False,
+    consolidation_time_window_days: float = 7.0,
+    consolidation_limit: int = 100,
     ctx: Context = None,
 ) -> str:
     """Run cognitive maintenance — consolidate, detect conflicts, mine patterns.
@@ -314,6 +316,16 @@ def think(
     - When you suspect contradictions exist.
     - Periodically to keep memory healthy.
 
+    Args:
+        run_consolidation: Merge similar memories.
+        run_conflict_scan: Detect contradictions.
+        run_pattern_mining: Mine cross-domain patterns (slow on large DBs,
+            default off — enable explicitly for deep analysis).
+        consolidation_time_window_days: Only consolidate memories within this
+            window (default 7 days). Keeps think() fast on large databases.
+        consolidation_limit: Max memories to consider for consolidation
+            (default 100). Prevents O(n²) blowup on large databases.
+
     Returns consolidation count, conflicts found, patterns, and triggers.
     """
     db = _get_db(ctx)
@@ -321,6 +333,9 @@ def think(
         "run_consolidation": run_consolidation,
         "run_conflict_scan": run_conflict_scan,
         "run_pattern_mining": run_pattern_mining,
+        "consolidation_time_window_days": consolidation_time_window_days,
+        "consolidation_limit": consolidation_limit,
+        "min_active_memories": 5,
     }
     result = db.think(config)
     # Also fetch patterns since they're often needed right after think

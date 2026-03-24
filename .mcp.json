@@ -1,8 +1,0 @@
-{
-  "mcpServers": {
-    "yantrikdb": {
-      "command": "python",
-      "args": ["-m", "yantrikdb_mcp"]
-    }
-  }
-}
