@@ -21,8 +21,13 @@ class OnnxEmbedder:
         from tokenizers import Tokenizer
 
         t0 = time.time()
-        model_path = hf_hub_download(model_name, "onnx/model.onnx")
-        tokenizer_path = hf_hub_download(model_name, "tokenizer.json")
+        # Try local cache first (no network), fall back to download
+        try:
+            model_path = hf_hub_download(model_name, "onnx/model.onnx", local_files_only=True)
+            tokenizer_path = hf_hub_download(model_name, "tokenizer.json", local_files_only=True)
+        except Exception:
+            model_path = hf_hub_download(model_name, "onnx/model.onnx")
+            tokenizer_path = hf_hub_download(model_name, "tokenizer.json")
 
         self._session = ort.InferenceSession(model_path)
         self._tokenizer = Tokenizer.from_file(tokenizer_path)
@@ -30,6 +35,10 @@ class OnnxEmbedder:
         self._tokenizer.enable_truncation(max_length=256)
         self._dim = 384
         log.info("ONNX embedder loaded in %.1fs", time.time() - t0)
+
+    def encode(self, text: str) -> list[float]:
+        """Alias for compatibility with sentence-transformers API."""
+        return self.embed(text)
 
     def embed(self, text: str) -> list[float]:
         enc = self._tokenizer.encode(text)

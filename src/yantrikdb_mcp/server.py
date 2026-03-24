@@ -14,6 +14,16 @@ from mcp.server.fastmcp import FastMCP
 logging.basicConfig(stream=sys.stderr, level=logging.INFO, format="%(levelname)s: %(message)s")
 log = logging.getLogger("yantrikdb.mcp")
 
+# Pre-import C extensions in the main thread to avoid deadlocks when
+# FastMCP dispatches sync tool handlers to worker threads.  Importing
+# numpy, onnxruntime, or Rust .pyd modules for the first time from a
+# non-main thread on Windows can deadlock due to GIL/import-lock
+# interactions.
+import numpy as np  # noqa: F401
+from yantrikdb import YantrikDB  # noqa: F401
+
+from .embedder import load_embedder  # noqa: E402
+
 # ── Server Instructions ──
 # These are injected into the agent's system prompt by MCP clients.
 
@@ -93,9 +103,6 @@ class _LazyDB:
         with self._init_lock:
             if self._db is not None:
                 return  # another thread beat us
-            from yantrikdb import YantrikDB
-
-            from .embedder import load_embedder
 
             db_path = os.environ.get("YANTRIKDB_DB_PATH", str(Path.home() / ".yantrikdb" / "memory.db"))
             model_name = os.environ.get("YANTRIKDB_EMBEDDING_MODEL", "all-MiniLM-L6-v2")
