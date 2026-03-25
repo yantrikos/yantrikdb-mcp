@@ -5,6 +5,7 @@ import time
 
 from mcp.server.fastmcp import Context
 from mcp.server.fastmcp.exceptions import ToolError
+from mcp.types import ToolAnnotations
 
 from .server import mcp
 
@@ -26,7 +27,7 @@ def _err(msg, **extra):
 # ── 1. remember ──
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(title="Remember", readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=False))
 def remember(
     text: str | None = None,
     memory_type: str = "semantic",
@@ -119,7 +120,7 @@ def remember(
 # ── 2. recall ──
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(title="Recall", readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False))
 def recall(
     query: str,
     top_k: int = 10,
@@ -225,7 +226,7 @@ def recall(
 # ── 3. forget ──
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(title="Forget", readOnlyHint=False, destructiveHint=True, idempotentHint=True, openWorldHint=False))
 def forget(
     rid: str | None = None,
     rids: list[str] | None = None,
@@ -259,7 +260,7 @@ def forget(
 # ── 4. correct ──
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(title="Correct", readOnlyHint=False, destructiveHint=True, idempotentHint=False, openWorldHint=False))
 def correct(
     rid: str,
     new_text: str,
@@ -300,7 +301,7 @@ def correct(
 # ── 5. think ──
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(title="Think", readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=False))
 def think(
     run_consolidation: bool = True,
     run_conflict_scan: bool = True,
@@ -364,7 +365,7 @@ def think(
 # ── 6. memory ──
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(title="Memory", readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=False))
 def memory(
     action: str,
     rid: str | None = None,
@@ -494,7 +495,7 @@ def memory(
 # ── 7. graph ──
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(title="Graph", readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=False))
 def graph(
     action: str,
     entity: str | None = None,
@@ -591,7 +592,7 @@ def graph(
 # ── 8. conflict ──
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(title="Conflict", readOnlyHint=False, destructiveHint=True, idempotentHint=False, openWorldHint=False))
 def conflict(
     action: str = "list",
     conflict_id: str | None = None,
@@ -687,7 +688,7 @@ def conflict(
 # ── 9. trigger ──
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(title="Trigger", readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False))
 def trigger(
     action: str = "pending",
     trigger_id: str | None = None,
@@ -752,7 +753,7 @@ def trigger(
 # ── 10. session ──
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(title="Session", readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=False))
 def session(
     action: str,
     session_id: str | None = None,
@@ -816,7 +817,7 @@ def session(
 # ── 11. temporal ──
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(title="Temporal", readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False))
 def temporal(
     action: str,
     days: float = 30.0,
@@ -860,7 +861,7 @@ def temporal(
 # ── 12. procedure ──
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(title="Procedure", readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=False))
 def procedure(
     action: str,
     text: str | None = None,
@@ -932,7 +933,7 @@ def procedure(
 # ── 13. category ──
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(title="Category", readOnlyHint=False, destructiveHint=True, idempotentHint=False, openWorldHint=False))
 def category(
     action: str = "list",
     category_name: str | None = None,
@@ -992,7 +993,7 @@ def category(
 # ── 14. personality ──
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(title="Personality", readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False))
 def personality(
     action: str = "get",
     trait_name: str | None = None,
@@ -1035,7 +1036,7 @@ def personality(
 # ── 15. stats ──
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(title="Stats", readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False))
 def stats(
     action: str = "stats",
     namespace: str | None = None,

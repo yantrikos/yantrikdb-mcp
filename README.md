@@ -111,6 +111,51 @@ Run the benchmark yourself: `python benchmarks/bench_token_savings.py`
 
 See [yantrikdb.com/guides/mcp](https://yantrikdb.com/guides/mcp/) for full documentation.
 
+## Examples
+
+### 1. Auto-recall at conversation start
+
+**User:** "What did we decide about the database migration?"
+
+The agent automatically calls `recall("database migration decision")` and retrieves relevant memories before responding — no manual prompting needed.
+
+### 2. Remember decisions + build knowledge graph
+
+**User:** "We're going with PostgreSQL for the new service. Alice will own the migration."
+
+The agent calls:
+- `remember(text="Decided to use PostgreSQL for the new service", domain="architecture", importance=0.8)`
+- `remember(text="Alice owns the PostgreSQL migration", domain="people", importance=0.7)`
+- `graph(action="relate", entity="Alice", target="PostgreSQL Migration", relationship="owns")`
+
+### 3. Contradiction detection
+
+After storing "We use Python 3.11" and later "We upgraded to Python 3.12", calling `think()` detects the conflict. The agent surfaces it:
+
+> "I found a contradiction: you previously said Python 3.11, but recently mentioned Python 3.12. Which is current?"
+
+Then resolves with `conflict(action="resolve", conflict_id="...", strategy="keep_b")`.
+
+## Privacy Policy
+
+YantrikDB MCP Server stores all data **locally on your machine** (default: `~/.yantrikdb/memory.db`). No data is sent to external servers, no telemetry is collected, and no third-party services are contacted during operation.
+
+- **Data collection:** Only what you explicitly store via the `remember` tool or what the AI agent stores on your behalf.
+- **Data storage:** Local SQLite database on your filesystem. You control the path via `YANTRIKDB_DB_PATH`.
+- **Third-party sharing:** None. Data never leaves your machine in local (stdio) mode.
+- **Network mode:** When using SSE/HTTP transport, data travels between your client and your self-hosted server. No Anthropic or third-party servers are involved.
+- **Embedding model:** Uses a local ONNX model (`all-MiniLM-L6-v2`). Model files are downloaded once from Hugging Face Hub on first use, then cached locally.
+- **Retention:** Data persists until you delete it (`forget` tool) or delete the database file.
+- **Contact:** developer@pranab.co.in
+
+Full policy: [yantrikdb.com/privacy](https://yantrikdb.com/privacy/)
+
+## Support
+
+- **Issues:** [github.com/yantrikos/yantrikdb-mcp/issues](https://github.com/yantrikos/yantrikdb-mcp/issues)
+- **Email:** developer@pranab.co.in
+- **Docs:** [yantrikdb.com/guides/mcp](https://yantrikdb.com/guides/mcp/)
+
 ## License
 
 This MCP server is licensed under **MIT** — use it freely in any project.
