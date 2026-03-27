@@ -1,0 +1,21 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.yantrikos/yantrikdb-mcp",
+  "description": "Cognitive memory for AI agents — persistent semantic memory with knowledge graph, adaptive recall, conflict detection, and entity relationships across sessions",
+  "repository": {
+    "url": "https://github.com/yantrikos/yantrikdb-mcp",
+    "source": "github"
+  },
+  "version": "0.4.6",
+  "packages": [
+    {
+      "registryType": "pypi",
+      "identifier": "yantrikdb-mcp",
+      "version": "0.4.6",
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": []
+    }
+  ]
+}

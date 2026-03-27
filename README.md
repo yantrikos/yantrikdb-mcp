@@ -1,3 +1,4 @@
+<!-- mcp-name: io.github.yantrikos/yantrikdb-mcp -->
 # YantrikDB MCP Server
 
 Cognitive memory for AI agents. Works with Claude Code, Cursor, Windsurf, and any MCP-compatible client.
