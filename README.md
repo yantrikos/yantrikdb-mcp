@@ -151,6 +151,10 @@ YantrikDB MCP Server stores all data **locally on your machine** (default: `~/.y
 
 Full policy: [yantrikdb.com/privacy](https://yantrikdb.com/privacy/)
 
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for a venv setup, running `pytest`, and opening PRs.
+
 ## Support
 
 - **Issues:** [github.com/yantrikos/yantrikdb-mcp/issues](https://github.com/yantrikos/yantrikdb-mcp/issues)
