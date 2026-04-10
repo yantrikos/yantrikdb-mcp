@@ -64,7 +64,7 @@ def remember(
         namespace: For per-project isolation.
         certainty: Confidence 0.0-1.0.
         emotional_state: joy, frustration, excitement, concern, neutral.
-        memories: List of memory dicts for batch. Each needs "text", optional: memory_type, importance, domain, source, valence, metadata, certainty, emotional_state.
+        memories: List of memory dicts for batch. Each needs "text", optional: memory_type, importance, domain, source, valence, metadata, namespace, certainty, emotional_state.
     """
     db = _get_db(ctx)
 
@@ -87,7 +87,7 @@ def remember(
                 importance=max(0.0, min(1.0, mem.get("importance", 0.5))),
                 valence=max(-1.0, min(1.0, mem.get("valence", 0.0))),
                 metadata=mem.get("metadata", {}),
-                namespace=namespace,
+                namespace=mem.get("namespace", namespace),
                 certainty=max(0.0, min(1.0, mem.get("certainty", 0.8))),
                 domain=mem.get("domain", "general"),
                 source=mem.get("source", "user"),
