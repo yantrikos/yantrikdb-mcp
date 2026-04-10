@@ -33,6 +33,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+]
 torch = ["sentence-transformers>=3.0.0"]
 
 [project.scripts]
@@ -46,3 +49,6 @@ Issues = "https://github.com/yantrikos/yantrikdb-mcp/issues"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
