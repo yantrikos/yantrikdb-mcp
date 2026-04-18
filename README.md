@@ -13,7 +13,11 @@ pip install yantrikdb-mcp
 
 ## Configure
 
-Add to your MCP client config:
+The MCP server has three deployment modes. Pick the one that fits your setup.
+
+### Mode 1 — Local (default, recommended for single user)
+
+The MCP server runs the engine in-process with a local SQLite database. Fast, private, zero dependencies.
 
 ```json
 {
@@ -27,9 +31,34 @@ Add to your MCP client config:
 
 That's it. The agent auto-recalls context, auto-remembers decisions, and auto-detects contradictions — no prompting needed.
 
-### Remote Server Mode
+### Mode 2 — HTTP Cluster (recommended for shared/multi-machine setups)
 
-Run as a shared server accessible from multiple machines:
+Forward all tool calls to a [YantrikDB HTTP cluster](https://github.com/yantrikos/yantrikdb-server) instead of using an embedded engine. The MCP server is a thin stateless client — all memories live on the cluster, accessible from any machine.
+
+Benefits: shared memory across machines, high availability, no local embedder download, no local database.
+
+```json
+{
+  "mcpServers": {
+    "yantrikdb": {
+      "command": "yantrikdb-mcp",
+      "env": {
+        "YANTRIKDB_SERVER_URL": "http://node1:7438,http://node2:7438",
+        "YANTRIKDB_TOKEN": "ydb_your_database_token"
+      }
+    }
+  }
+}
+```
+
+- Comma-separate multiple nodes for Raft cluster auto-discovery
+- Automatic leader-following on failover
+- 15s request timeout
+- Get the token from the cluster: `yantrikdb token create --db your_database`
+
+### Mode 3 — SSE Server (legacy, single remote instance)
+
+Run the MCP server itself as a long-running SSE server with its own embedded database. Clients connect via HTTP streaming.
 
 ```bash
 # Generate a secure API key
@@ -38,8 +67,6 @@ export YANTRIKDB_API_KEY=$(python -c "import secrets; print(secrets.token_urlsaf
 # Start SSE server
 yantrikdb-mcp --transport sse --port 8420
 ```
-
-Connect clients to the remote server:
 
 ```json
 {
@@ -55,16 +82,18 @@ Connect clients to the remote server:
 }
 ```
 
-Supports `sse` and `streamable-http` transports. Bearer token auth via `YANTRIKDB_API_KEY` env var.
+Supports `sse` and `streamable-http` transports. Note: SSE connections can drop on idle — Mode 2 (HTTP Cluster) is more reliable for shared deployments.
 
 ### Environment Variables
 
-| Variable | Default | Description |
-|---|---|---|
-| `YANTRIKDB_DB_PATH` | `~/.yantrikdb/memory.db` | Database file path |
-| `YANTRIKDB_EMBEDDING_MODEL` | `all-MiniLM-L6-v2` | Sentence transformer model |
-| `YANTRIKDB_EMBEDDING_DIM` | `384` | Embedding dimension |
-| `YANTRIKDB_API_KEY` | *(none)* | Bearer token for network transports |
+| Variable | Used in Mode | Default | Description |
+|---|---|---|---|
+| `YANTRIKDB_SERVER_URL` | Cluster | *(unset → local mode)* | Comma-separated cluster node URLs |
+| `YANTRIKDB_TOKEN` | Cluster | *(none)* | Bearer token for the cluster database |
+| `YANTRIKDB_DB_PATH` | Local | `~/.yantrikdb/memory.db` | Database file path |
+| `YANTRIKDB_EMBEDDING_MODEL` | Local | `all-MiniLM-L6-v2` | Sentence transformer model |
+| `YANTRIKDB_EMBEDDING_DIM` | Local | `384` | Embedding dimension |
+| `YANTRIKDB_API_KEY` | SSE server | *(none)* | Bearer token when serving SSE/HTTP |
 
 ## Why Not File-Based Memory?
 
