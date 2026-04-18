@@ -39,6 +39,10 @@ def main():
         print("  YANTRIKDB_EMBEDDING_MODEL  Sentence transformer model (default: all-MiniLM-L6-v2)")
         print("  YANTRIKDB_EMBEDDING_DIM    Embedding dimension (default: 384)")
         print("  YANTRIKDB_API_KEY          Bearer token for SSE/HTTP auth (required for network transports)")
+        print()
+        print("Remote cluster mode (set YANTRIKDB_SERVER_URL to use HTTP backend instead of embedded engine):")
+        print("  YANTRIKDB_SERVER_URL       Comma-separated cluster node URLs (e.g. http://node1:7438,http://node2:7438)")
+        print("  YANTRIKDB_TOKEN            Bearer token for the cluster database")
         sys.exit(0)
 
     transport = _cli_arg("--transport") or "stdio"

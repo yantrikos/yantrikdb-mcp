@@ -32,10 +32,11 @@ YantrikDB is your persistent cognitive memory — it remembers across conversati
 Use it AUTOMATICALLY without the user asking.
 
 ## Auto-recall (BEFORE responding)
-- At conversation start: call `recall` with a summary of the user's first message to load relevant context.
+- At conversation start: call `recall` with a short natural language sentence summarizing the user's intent.
 - When the user references past work, decisions, people, preferences, or "last time": call `recall`.
 - When you're unsure about a fact the user assumes you know: call `recall`.
 - Aim to recall EARLY — context retrieved after you've already responded is wasted.
+- IMPORTANT: Keep queries to 5-10 words. Use natural sentences, NOT keyword lists. Make multiple focused calls instead of one broad one.
 
 ## Auto-remember (DURING conversation)
 Proactively call `remember` whenever you encounter:
@@ -91,6 +92,9 @@ class _LazyDB:
 
     The Rust engine uses internal Mutex/RwLock for thread safety, so no
     Python-level lock is needed around individual operations.
+
+    When YANTRIKDB_SERVER_URL is set, uses an HTTP backend that forwards
+    all operations to a YantrikDB cluster — no local engine or embedder needed.
     """
 
     def __init__(self):
@@ -104,18 +108,49 @@ class _LazyDB:
             if self._db is not None:
                 return  # another thread beat us
 
-            db_path = os.environ.get("YANTRIKDB_DB_PATH", str(Path.home() / ".yantrikdb" / "memory.db"))
-            model_name = os.environ.get("YANTRIKDB_EMBEDDING_MODEL", "all-MiniLM-L6-v2")
-            embedding_dim = int(os.environ.get("YANTRIKDB_EMBEDDING_DIM", "384"))
-            Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+            server_url = os.environ.get("YANTRIKDB_SERVER_URL")
+            if server_url:
+                self._init_http(server_url)
+            else:
+                self._init_embedded()
 
-            t0 = time.time()
-            embedder = load_embedder(model_name)
-            embedding_dim = embedder.dim() if hasattr(embedder, 'dim') and callable(embedder.dim) else embedding_dim
+    def _init_http(self, server_url: str):
+        """Connect to a remote YantrikDB cluster via HTTP API."""
+        from .http_backend import HttpBackend
 
-            log.info("Opening YantrikDB at: %s (dim=%d)", db_path, embedding_dim)
-            self._db = YantrikDB(db_path=db_path, embedding_dim=embedding_dim, embedder=embedder)
-            log.info("YantrikDB ready (init: %.1fs)", time.time() - t0)
+        t0 = time.time()
+        # Support comma-separated URLs for multi-node clusters
+        nodes = [u.strip().rstrip("/") for u in server_url.split(",") if u.strip()]
+        token = os.environ.get("YANTRIKDB_TOKEN", "")
+
+        log.info("Connecting to YantrikDB cluster: %s", ", ".join(nodes))
+        self._db = HttpBackend(server_urls=nodes, token=token)
+
+        # Verify connectivity by finding the leader
+        try:
+            leader = self._db._find_leader()
+            stats = self._db.stats()
+            log.info(
+                "YantrikDB cluster connected — leader: %s, %d memories (init: %.1fs)",
+                leader, stats.active_memories, time.time() - t0,
+            )
+        except Exception as e:
+            log.warning("Cluster connectivity check failed: %s (will retry on first tool call)", e)
+
+    def _init_embedded(self):
+        """Start the embedded YantrikDB engine with local database."""
+        db_path = os.environ.get("YANTRIKDB_DB_PATH", str(Path.home() / ".yantrikdb" / "memory.db"))
+        model_name = os.environ.get("YANTRIKDB_EMBEDDING_MODEL", "all-MiniLM-L6-v2")
+        embedding_dim = int(os.environ.get("YANTRIKDB_EMBEDDING_DIM", "384"))
+        Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+
+        t0 = time.time()
+        embedder = load_embedder(model_name)
+        embedding_dim = embedder.dim() if hasattr(embedder, 'dim') and callable(embedder.dim) else embedding_dim
+
+        log.info("Opening YantrikDB at: %s (dim=%d)", db_path, embedding_dim)
+        self._db = YantrikDB(db_path=db_path, embedding_dim=embedding_dim, embedder=embedder)
+        log.info("YantrikDB ready (init: %.1fs)", time.time() - t0)
 
     @property
     def db(self):

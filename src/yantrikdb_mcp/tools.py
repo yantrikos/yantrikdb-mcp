@@ -152,8 +152,16 @@ def recall(
     - Use refine_from when first recall had low confidence (< 0.5).
     - Use feedback_rid after using a recalled memory to improve future retrieval.
 
+    QUERY GUIDELINES:
+    - Use a short natural language sentence (5-10 words), NOT keyword lists.
+    - GOOD: "private retail demo with shift brain"
+    - GOOD: "user's architecture preferences"
+    - BAD:  "private retail demo stunning pitch shift brain yantrikdb rewritten reality private operations memory"
+    - Keyword stuffing degrades recall quality and is slower. Ask one focused question per call.
+    - If you need multiple topics, make separate recall calls.
+
     Args:
-        query: Natural language search query. Be descriptive.
+        query: Short natural language sentence (5-10 words). NOT a keyword list.
         top_k: Max results (default 10). 3-5 for focused, 10-20 for broad.
         memory_type: Filter: "semantic", "episodic", "procedural".
         domain: Filter: "work", "preference", "architecture", "people", etc.
