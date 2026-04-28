@@ -292,7 +292,13 @@ class HttpBackend:
         )
 
     def stats(self, namespace=None) -> "_Stats":
-        result = self._get("/v1/stats")
+        params = {"namespace": namespace} if namespace else None
+        result = self._get("/v1/stats", params=params)
+        # tools.py uses both subscript access (result["procedural"] = ...)
+        # and dict ops (s.get("active_memories", 0)) on this return value.
+        # Wrap in _Stats which subclasses dict for those ops while still
+        # exposing attribute-style access for legacy callers.  See
+        # yantrikos/yantrikdb-mcp#2 follow-up.
         return _Stats(result)
 
     def get(self, rid: str):
@@ -346,29 +352,37 @@ class HttpBackend:
     def _not_supported(method: str, hint: str = "") -> RemoteUnsupportedError:
         return RemoteUnsupportedError(method, hint)
 
-    def procedural_stats(self) -> dict:
+    # All stubs accept *args, **kw defensively.  The tool layer in tools.py
+    # injects positional args and kwargs (notably `namespace`) that don't
+    # match the embedded backend's signatures cleanly.  A v0.5.1 stub like
+    # `def procedural_stats(self)` would TypeError on an unexpected kwarg
+    # before it could raise the friendlier RemoteUnsupportedError —
+    # exactly the @acidport regression report on stats(action="stats")
+    # in yantrikos/yantrikdb-mcp#2 follow-up.
+
+    def procedural_stats(self, *args, **kw) -> dict:
         raise self._not_supported(
             "procedural_stats",
             hint="No /v1/stats sub-endpoint for procedural state today."
         )
 
-    def archive(self, rid: str) -> bool:
+    def archive(self, *args, **kw) -> bool:
         raise self._not_supported("archive")
 
-    def hydrate(self, rid: str) -> bool:
+    def hydrate(self, *args, **kw) -> bool:
         raise self._not_supported("hydrate")
 
-    def list_memories(self, **kw) -> list:
+    def list_memories(self, *args, **kw) -> list:
         raise self._not_supported("list_memories",
                                   hint="Use recall_with_response with a broad query.")
 
-    def derive_personality(self, **kw) -> dict:
+    def derive_personality(self, *args, **kw) -> dict:
         raise self._not_supported("derive_personality")
 
-    def get_pending_triggers(self, **kw) -> list:
+    def get_pending_triggers(self, *args, **kw) -> list:
         raise self._not_supported("get_pending_triggers")
 
-    def get_trigger_history(self, **kw) -> list:
+    def get_trigger_history(self, *args, **kw) -> list:
         raise self._not_supported("get_trigger_history")
 
     def entity_profile(self, *args, **kw) -> dict:
@@ -405,7 +419,11 @@ class HttpBackend:
         raise self._not_supported("reset_category_to_seed")
 
     def learned_weights(self, *args, **kw):
-        raise self._not_supported("learned_weights")
+        raise self._not_supported(
+            "learned_weights",
+            hint="Adapted recall scoring weights aren't exposed over HTTP "
+                 "yet; embedded mode has them at db.learned_weights()."
+        )
 
     def session_history(self, *args, **kw) -> list:
         raise self._not_supported("session_history")
@@ -464,17 +482,38 @@ class _ResolveResult:
         self.new_memory_rid = d.get("new_memory_rid")
 
 
-class _Stats:
-    def __init__(self, d: dict):
-        self.active_memories = d.get("active_memories", 0)
-        self.consolidated_memories = d.get("consolidated_memories", 0)
-        self.tombstoned_memories = d.get("tombstoned_memories", 0)
-        self.archived_memories = d.get("archived_memories", 0)
-        self.edges = d.get("edges", 0)
-        self.entities = d.get("entities", 0)
-        self.open_conflicts = d.get("open_conflicts", 0)
-        self.resolved_conflicts = d.get("resolved_conflicts", 0)
-        self.pending_triggers = d.get("pending_triggers", 0)
-        self.active_patterns = d.get("active_patterns", 0)
-        self.scoring_cache_entries = d.get("scoring_cache_entries", 0)
-        self.vec_index_entries = d.get("vec_index_entries", 0)
+class _Stats(dict):
+    """Dict-and-attribute-compatible stats view.
+
+    yantrikos/yantrikdb-mcp#2 (v0.5.1) shipped a fix for `_Conflict` not
+    being subscriptable but missed the same problem in `_Stats`. The
+    stats() tool in tools.py uses BOTH:
+      result = db.stats(...)
+      result["procedural"] = ...        # subscript-set
+      s.get("active_memories", 0)       # dict-method
+      s.active_memories                 # attribute (legacy)
+
+    Subclassing dict gives subscript + dict-methods for free, and the
+    __getattr__ override keeps existing attribute-style callers working.
+    """
+
+    _DEFAULT_FIELDS = (
+        "active_memories", "consolidated_memories", "tombstoned_memories",
+        "archived_memories", "edges", "entities",
+        "open_conflicts", "resolved_conflicts",
+        "pending_triggers", "active_patterns",
+        "scoring_cache_entries", "vec_index_entries",
+    )
+
+    def __init__(self, d: dict | None = None):
+        super().__init__(d or {})
+        # Ensure documented fields always exist so attribute access
+        # never KeyErrors on a fresh server.
+        for f in self._DEFAULT_FIELDS:
+            self.setdefault(f, 0)
+
+    def __getattr__(self, name: str):
+        try:
+            return self[name]
+        except KeyError as e:
+            raise AttributeError(name) from e
