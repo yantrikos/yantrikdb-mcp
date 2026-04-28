@@ -3,6 +3,10 @@
 When YANTRIKDB_SERVER_URL is set (e.g. "http://192.168.4.140:7438,http://192.168.4.141:7438"),
 the MCP server forwards all operations to the cluster via HTTP instead of using
 the embedded engine.  Leader auto-discovery handles Raft failovers transparently.
+
+Not every embedded-backend method has a corresponding HTTP endpoint yet. The
+methods that don't raise `RemoteUnsupportedError` with a clear hint, instead
+of an opaque `AttributeError`. See yantrikdb-mcp issue #2 for context.
 """
 
 import json
@@ -13,6 +17,31 @@ from urllib.parse import urljoin
 import requests
 
 log = logging.getLogger("yantrikdb.mcp.http")
+
+
+class RemoteUnsupportedError(NotImplementedError):
+    """Raised when a method is not yet exposed over the HTTP transport.
+
+    Using NotImplementedError as the base means tool handlers that catch it
+    can render a friendly message; raw `except Exception` callers also see a
+    sensible class name in tracebacks.
+    """
+
+    def __init__(self, method: str, hint: str = "") -> None:
+        msg = (
+            f"{method!r} is not supported when YANTRIKDB_SERVER_URL points at a "
+            f"remote cluster — the embedded backend exposes it but the HTTP "
+            f"transport does not yet have a corresponding endpoint."
+        )
+        if hint:
+            msg = f"{msg}\nHint: {hint}"
+        msg = (
+            f"{msg}\nWorkaround: run yantrikdb-mcp in embedded mode "
+            f"(unset YANTRIKDB_SERVER_URL) or open an issue at "
+            f"https://github.com/yantrikos/yantrikdb-mcp/issues."
+        )
+        super().__init__(msg)
+        self.method = method
 
 
 class HttpBackend:
@@ -190,33 +219,77 @@ class HttpBackend:
 
     def get_conflicts(self, status=None, priority=None, entity=None,
                       conflict_type=None, limit=20) -> list:
-        result = self._get("/v1/conflicts")
+        # Server may accept query-string filters; pass them through best-effort.
+        params: dict = {}
+        if status:
+            params["status"] = status
+        if priority:
+            params["priority"] = priority
+        if entity:
+            params["entity"] = entity
+        if conflict_type:
+            params["conflict_type"] = conflict_type
+        if limit:
+            params["limit"] = limit
+        result = self._get("/v1/conflicts", params=params or None)
         conflicts = result.get("conflicts", [])
+        # Client-side filter belt-and-braces in case the server didn't honor a param
         if status:
             conflicts = [c for c in conflicts if c.get("status") == status]
-        return [_Conflict(c) for c in conflicts[:limit]]
+        if priority:
+            conflicts = [c for c in conflicts if c.get("priority") == priority]
+        if entity:
+            conflicts = [c for c in conflicts if c.get("entity") == entity]
+        if conflict_type:
+            conflicts = [c for c in conflicts if c.get("conflict_type") == conflict_type]
+        # Return plain dicts — tools.py uses subscript access (c["..."]).
+        # Embedded backend also returns dicts; HttpBackend used to wrap in
+        # _Conflict, which broke `conflict(action="list")` with a
+        # `'_Conflict' object is not subscriptable` error. (issue #2)
+        return list(conflicts[:limit])
+
+    def get_conflict(self, conflict_id: str):
+        """Get a single conflict by id. Server has no /v1/conflicts/{id} GET
+        today, so we filter the list response. Returns plain dict or None."""
+        all_conf = self._get("/v1/conflicts").get("conflicts", [])
+        for c in all_conf:
+            if c.get("conflict_id") == conflict_id:
+                return c
+        return None
 
     def resolve_conflict(self, conflict_id: str, strategy: str,
-                         winner_rid=None, new_text=None, note=None) -> "_ResolveResult":
-        body: dict = {
-            "conflict_id": conflict_id,
-            "strategy": strategy,
-        }
+                         winner_rid=None, new_text=None,
+                         resolution_note=None, note=None) -> "_ResolveResult":
+        body: dict = {"strategy": strategy}
         if winner_rid:
             body["winner_rid"] = winner_rid
         if new_text:
             body["new_text"] = new_text
-        if note:
-            body["resolution_note"] = note
-        result = self._post("/v1/conflicts/resolve", body)
+        # Accept both kw spellings for cross-backend compat
+        rn = resolution_note if resolution_note is not None else note
+        if rn:
+            body["resolution_note"] = rn
+        # Server route is /v1/conflicts/{id}/resolve, NOT /v1/conflicts/resolve
+        result = self._post(f"/v1/conflicts/{conflict_id}/resolve", body)
         return _ResolveResult(result)
 
     def dismiss_conflict(self, conflict_id: str, note=None) -> bool:
-        body: dict = {"conflict_id": conflict_id, "strategy": "dismiss"}
+        body: dict = {"strategy": "dismiss"}
         if note:
             body["resolution_note"] = note
-        self._post("/v1/conflicts/resolve", body)
+        self._post(f"/v1/conflicts/{conflict_id}/resolve", body)
         return True
+
+    def reclassify_conflict(self, conflict_id: str, new_type: str,
+                            note=None) -> "_ResolveResult":
+        # No dedicated reclassify endpoint yet; closest path is resolve with a
+        # custom strategy. Until the server exposes one, raise the clear
+        # not-supported error so callers can degrade gracefully.
+        raise self._not_supported(
+            "reclassify_conflict",
+            hint="Use embedded mode or file a feature request for "
+                 "POST /v1/conflicts/{id}/reclassify."
+        )
 
     def stats(self, namespace=None) -> "_Stats":
         result = self._get("/v1/stats")
@@ -252,6 +325,98 @@ class HttpBackend:
     def get_personality(self, recompute=False) -> dict:
         result = self._get("/v1/personality")
         return result
+
+    def session_end(self, session_id: str, summary: str | None = None) -> dict:
+        """End an active session. Maps to DELETE /v1/sessions/{id}."""
+        body: dict = {}
+        if summary:
+            body["summary"] = summary
+        # _post supports POST; for DELETE we use the session directly
+        url = self._url(f"/v1/sessions/{session_id}")
+        r = self._session.delete(url, json=body, timeout=self._timeout)
+        r.raise_for_status()
+        return r.json() if r.content else {}
+
+    # ── stubs for methods without HTTP endpoints today ──────────────
+    # Each raises RemoteUnsupportedError with a clear pointer. This replaces
+    # the previous behaviour of `AttributeError: 'HttpBackend' object has no
+    # attribute '<method>'` (issue #2). Add real impls as endpoints land.
+
+    @staticmethod
+    def _not_supported(method: str, hint: str = "") -> RemoteUnsupportedError:
+        return RemoteUnsupportedError(method, hint)
+
+    def procedural_stats(self) -> dict:
+        raise self._not_supported(
+            "procedural_stats",
+            hint="No /v1/stats sub-endpoint for procedural state today."
+        )
+
+    def archive(self, rid: str) -> bool:
+        raise self._not_supported("archive")
+
+    def hydrate(self, rid: str) -> bool:
+        raise self._not_supported("hydrate")
+
+    def list_memories(self, **kw) -> list:
+        raise self._not_supported("list_memories",
+                                  hint="Use recall_with_response with a broad query.")
+
+    def derive_personality(self, **kw) -> dict:
+        raise self._not_supported("derive_personality")
+
+    def get_pending_triggers(self, **kw) -> list:
+        raise self._not_supported("get_pending_triggers")
+
+    def get_trigger_history(self, **kw) -> list:
+        raise self._not_supported("get_trigger_history")
+
+    def entity_profile(self, *args, **kw) -> dict:
+        raise self._not_supported("entity_profile")
+
+    def search_entities(self, *args, **kw) -> list:
+        raise self._not_supported("search_entities")
+
+    def relationship_depth(self, *args, **kw) -> int:
+        raise self._not_supported("relationship_depth")
+
+    def link_memory_entity(self, *args, **kw):
+        raise self._not_supported("link_memory_entity")
+
+    def backfill_memory_entities(self, *args, **kw):
+        raise self._not_supported("backfill_memory_entities")
+
+    def rebuild_graph_index(self, *args, **kw):
+        raise self._not_supported("rebuild_graph_index")
+
+    def rebuild_vec_index(self, *args, **kw):
+        raise self._not_supported("rebuild_vec_index")
+
+    def record_procedural(self, *args, **kw):
+        raise self._not_supported("record_procedural")
+
+    def reinforce_procedural(self, *args, **kw):
+        raise self._not_supported("reinforce_procedural")
+
+    def learn_category_members(self, *args, **kw):
+        raise self._not_supported("learn_category_members")
+
+    def reset_category_to_seed(self, *args, **kw):
+        raise self._not_supported("reset_category_to_seed")
+
+    def learned_weights(self, *args, **kw):
+        raise self._not_supported("learned_weights")
+
+    def session_history(self, *args, **kw) -> list:
+        raise self._not_supported("session_history")
+
+    def session_abandon_stale(self, *args, **kw):
+        raise self._not_supported("session_abandon_stale")
+
+    def active_session(self, *args, **kw):
+        raise self._not_supported("active_session",
+                                  hint="POST /v1/sessions to start a session; "
+                                       "track session_id client-side.")
 
     def close(self):
         self._session.close()
