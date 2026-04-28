@@ -280,8 +280,7 @@ class HttpBackend:
         self._post(f"/v1/conflicts/{conflict_id}/resolve", body)
         return True
 
-    def reclassify_conflict(self, conflict_id: str, new_type: str,
-                            note=None) -> "_ResolveResult":
+    def reclassify_conflict(self, *args, **kw) -> "_ResolveResult":
         # No dedicated reclassify endpoint yet; closest path is resolve with a
         # custom strategy. Until the server exposes one, raise the clear
         # not-supported error so callers can degrade gracefully.
@@ -436,50 +435,130 @@ class HttpBackend:
                                   hint="POST /v1/sessions to start a session; "
                                        "track session_id client-side.")
 
+    def session_start(self, *args, **kw) -> dict:
+        """Start a session — POST /v1/sessions. Real implementation."""
+        body = dict(kw)
+        if args and isinstance(args[0], dict):
+            body.update(args[0])
+        return self._post("/v1/sessions", body)
+
+    # Stubs for the other methods tools.py invokes that have no /v1
+    # endpoint yet. Each accepts arbitrary args/kwargs so the tool
+    # layer's argument injection doesn't TypeError before the friendly
+    # RemoteUnsupportedError fires.
+
+    def set_personality_trait(self, *args, **kw):
+        raise self._not_supported("set_personality_trait")
+
+    def stale(self, *args, **kw) -> list:
+        raise self._not_supported("stale",
+                                  hint="Server-side stale-memory listing isn't "
+                                       "exposed over HTTP yet.")
+
+    def substitution_categories(self, *args, **kw) -> list:
+        raise self._not_supported("substitution_categories")
+
+    def substitution_members(self, *args, **kw) -> list:
+        raise self._not_supported("substitution_members")
+
+    def surface_procedural(self, *args, **kw) -> list:
+        raise self._not_supported("surface_procedural",
+                                  hint="Procedural-memory surfacing is "
+                                       "embedded-only today.")
+
+    def upcoming(self, *args, **kw) -> list:
+        raise self._not_supported("upcoming",
+                                  hint="Trigger-upcoming listing isn't "
+                                       "exposed over HTTP yet.")
+
     def close(self):
         self._session.close()
 
 
 # ── Adapter classes to match embedded engine return types ───────────
-
-class _ThinkResult:
-    def __init__(self, d: dict):
-        self.triggers = d.get("triggers", [])
-        self.consolidation_count = d.get("consolidations", 0)
-        self.conflicts_found = d.get("conflicts_found", 0)
-        self.patterns_new = d.get("patterns_new", 0)
-        self.patterns_updated = d.get("patterns_updated", 0)
-        self.duration_ms = d.get("duration_ms", 0)
+#
+# All wrappers subclass dict so that callers in tools.py can use BOTH
+# subscript access (r["field"]) and attribute access (r.field).
+# Default fields are seeded so attribute access never KeyErrors when
+# the server omits a field. This contract is enforced by the
+# test_backend_parity test.
 
 
-class _Edge:
-    def __init__(self, d: dict):
-        self.edge_id = d.get("edge_id", "")
-        self.src = d.get("src", "")
-        self.dst = d.get("dst", "")
-        self.rel_type = d.get("rel_type", "")
-        self.weight = d.get("weight", 1.0)
+class _DictWrapper(dict):
+    """Base for adapter classes — dict-and-attribute-compatible."""
+
+    _DEFAULTS: tuple = ()
+
+    def __init__(self, d: dict | None = None):
+        super().__init__(d or {})
+        for k, default in self._DEFAULTS:
+            self.setdefault(k, default)
+
+    def __getattr__(self, name: str):
+        try:
+            return self[name]
+        except KeyError as e:
+            raise AttributeError(name) from e
 
 
-class _Conflict:
-    def __init__(self, d: dict):
-        self.conflict_id = d.get("conflict_id", "")
-        self.conflict_type = d.get("conflict_type", "")
-        self.priority = d.get("priority", "")
-        self.status = d.get("status", "")
-        self.memory_a = d.get("memory_a", "")
-        self.memory_b = d.get("memory_b", "")
-        self.entity = d.get("entity", "")
-        self.detection_reason = d.get("detection_reason", "")
-        self.detected_at = d.get("detected_at", "")
-        self.consolidation_status = d.get("status", "")
+class _ThinkResult(_DictWrapper):
+    _DEFAULTS = (
+        ("triggers", []),
+        ("consolidation_count", 0),
+        ("conflicts_found", 0),
+        ("patterns_new", 0),
+        ("patterns_updated", 0),
+        ("duration_ms", 0),
+    )
+
+    def __init__(self, d: dict | None = None):
+        # Server returns "consolidations" (count); embedded uses
+        # "consolidation_count". Normalise so callers can read either.
+        d = dict(d or {})
+        if "consolidation_count" not in d and "consolidations" in d:
+            d["consolidation_count"] = d["consolidations"]
+        super().__init__(d)
 
 
-class _ResolveResult:
-    def __init__(self, d: dict):
-        self.winner_rid = d.get("winner_rid")
-        self.loser_tombstoned = d.get("loser_tombstoned", False)
-        self.new_memory_rid = d.get("new_memory_rid")
+class _Edge(_DictWrapper):
+    _DEFAULTS = (
+        ("edge_id", ""),
+        ("src", ""),
+        ("dst", ""),
+        ("rel_type", ""),
+        ("weight", 1.0),
+    )
+
+
+class _Conflict(_DictWrapper):
+    _DEFAULTS = (
+        ("conflict_id", ""),
+        ("conflict_type", ""),
+        ("priority", ""),
+        ("status", ""),
+        ("memory_a", ""),
+        ("memory_b", ""),
+        ("entity", ""),
+        ("detection_reason", ""),
+        ("detected_at", ""),
+        # legacy alias used by some callers
+        ("consolidation_status", ""),
+    )
+
+    def __init__(self, d: dict | None = None):
+        d = dict(d or {})
+        # Mirror status into legacy alias for backwards compat
+        if "consolidation_status" not in d and "status" in d:
+            d["consolidation_status"] = d["status"]
+        super().__init__(d)
+
+
+class _ResolveResult(_DictWrapper):
+    _DEFAULTS = (
+        ("winner_rid", None),
+        ("loser_tombstoned", False),
+        ("new_memory_rid", None),
+    )
 
 
 class _Stats(dict):
