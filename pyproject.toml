@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "yantrikdb-mcp"
-version = "0.5.3"
+version = "0.6.0"
 description = "YantrikDB MCP Server — Cognitive memory for AI agents"
 readme = "README.md"
 license = "MIT"
@@ -23,19 +23,28 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 dependencies = [
-    "yantrikdb>=0.3.0",
+    # Engine v0.7.4+ ships a bundled Rust embedder (potion-base-2M, 64 dim)
+    # accessible via YantrikDB.with_default(). Default install uses it.
+    "yantrikdb>=0.7.4",
     "mcp[cli]>=1.2.0",
-    "onnxruntime>=1.17.0",
-    "tokenizers>=0.15.0",
-    "huggingface-hub>=0.20.0",
-    "numpy>=1.24.0",
     "click>=8.0.0",
     "requests>=2.28.0",
 ]
 
 [project.optional-dependencies]
+# Legacy / higher-quality embedder: ONNX MiniLM-L6-v2 at 384 dim.
+# Required for back-compat with DBs created by yantrikdb-mcp <=0.5.3.
+# Auto-detected when an existing 384-dim DB is opened.
+onnx = [
+    "onnxruntime>=1.17.0",
+    "tokenizers>=0.15.0",
+    "huggingface-hub>=0.20.0",
+    "numpy>=1.24.0",
+]
 dev = [
     "pytest>=8.0",
+    # Dev environments need ONNX so the existing 384-dim test fixtures work.
+    "yantrikdb-mcp[onnx]",
 ]
 torch = ["sentence-transformers>=3.0.0"]
 

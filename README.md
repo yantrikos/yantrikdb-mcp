@@ -8,8 +8,18 @@ Cognitive memory for AI agents. Works with Claude Code, Cursor, Windsurf, and an
 ## Install
 
 ```bash
+# Default — uses the engine's bundled 64-dim embedder. ~10 MB install,
+# ~80 ms cold start, no native ML deps.
 pip install yantrikdb-mcp
+
+# Optional: higher-quality 384-dim ONNX MiniLM-L6-v2 embedder (~150 MB install).
+# Auto-used when an existing pre-v0.6 database is detected.
+pip install 'yantrikdb-mcp[onnx]'
 ```
+
+> **Upgrading from v0.5.x?** Your existing database stays at 384 dim — install
+> the `[onnx]` extra to keep using it transparently. New installs default to
+> the lean bundled embedder. See [Embedder backends](#embedder-backends) below.
 
 ## Configure
 
@@ -91,9 +101,28 @@ Supports `sse` and `streamable-http` transports. Note: SSE connections can drop 
 | `YANTRIKDB_SERVER_URL` | Cluster | *(unset → local mode)* | Comma-separated cluster node URLs |
 | `YANTRIKDB_TOKEN` | Cluster | *(none)* | Bearer token for the cluster database |
 | `YANTRIKDB_DB_PATH` | Local | `~/.yantrikdb/memory.db` | Database file path |
-| `YANTRIKDB_EMBEDDING_MODEL` | Local | `all-MiniLM-L6-v2` | Sentence transformer model |
-| `YANTRIKDB_EMBEDDING_DIM` | Local | `384` | Embedding dimension |
+| `YANTRIKDB_EMBEDDER` | Local | `auto` | Backend selector: `auto` \| `bundled` \| `onnx` |
+| `YANTRIKDB_EMBEDDING_MODEL` | Local | `all-MiniLM-L6-v2` | ONNX model name (only used when `YANTRIKDB_EMBEDDER=onnx`) |
 | `YANTRIKDB_API_KEY` | SSE server | *(none)* | Bearer token when serving SSE/HTTP |
+
+### Embedder backends
+
+Local mode ships two embedders. The MCP picks one automatically; override with `YANTRIKDB_EMBEDDER`.
+
+| Backend | Dim | Cold start | Install size | When it's used |
+|---|---|---|---|---|
+| `bundled` (engine default) | 64 | ~80 ms | ~10 MB | New / empty databases |
+| `onnx` (MiniLM-L6-v2) | 384 | ~2 s | ~150 MB | Existing pre-v0.6 databases (auto-detected), or when set explicitly |
+
+**`auto`** (default) reads the SQLite file at `YANTRIKDB_DB_PATH` and picks `onnx` if it already contains memories — preserving recall quality on upgrades — and `bundled` otherwise. Set `YANTRIKDB_EMBEDDER=bundled` or `=onnx` to override.
+
+If you set `YANTRIKDB_EMBEDDER=onnx` (or auto-detection picks it) without installing the extras, the server fails fast with an install hint:
+
+```
+RuntimeError: Existing DB has memories embedded with the 384-dim ONNX
+model, but ONNX deps are missing.
+  Install with:  pip install 'yantrikdb-mcp[onnx]'
+```
 
 ## Why Not File-Based Memory?
 

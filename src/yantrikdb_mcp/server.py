@@ -16,13 +16,20 @@ log = logging.getLogger("yantrikdb.mcp")
 
 # Pre-import C extensions in the main thread to avoid deadlocks when
 # FastMCP dispatches sync tool handlers to worker threads.  Importing
-# numpy, onnxruntime, or Rust .pyd modules for the first time from a
-# non-main thread on Windows can deadlock due to GIL/import-lock
-# interactions.
-import numpy as np  # noqa: F401
+# Rust .pyd modules for the first time from a non-main thread on Windows
+# can deadlock due to GIL/import-lock interactions.
 from yantrikdb import YantrikDB  # noqa: F401
 
-from .embedder import load_embedder  # noqa: E402
+# numpy + onnxruntime are only needed when the optional ONNX backend is in
+# use; importing them here (best-effort) keeps the deadlock-avoidance the
+# same for users on the legacy 384-dim path, while letting bundled-only
+# installs skip the dependency entirely.
+try:
+    import numpy as np  # noqa: F401
+except ImportError:
+    pass
+
+from .embedder import load_engine  # noqa: E402
 
 # ── Server Instructions ──
 # These are injected into the agent's system prompt by MCP clients.
@@ -138,19 +145,20 @@ class _LazyDB:
             log.warning("Cluster connectivity check failed: %s (will retry on first tool call)", e)
 
     def _init_embedded(self):
-        """Start the embedded YantrikDB engine with local database."""
+        """Start the embedded YantrikDB engine with local database.
+
+        Embedder backend is selected by `load_engine()` based on the
+        `YANTRIKDB_EMBEDDER` env var and whether the DB already has data.
+        See `embedder.load_engine` for the full decision matrix.
+        """
         db_path = os.environ.get("YANTRIKDB_DB_PATH", str(Path.home() / ".yantrikdb" / "memory.db"))
         model_name = os.environ.get("YANTRIKDB_EMBEDDING_MODEL", "all-MiniLM-L6-v2")
-        embedding_dim = int(os.environ.get("YANTRIKDB_EMBEDDING_DIM", "384"))
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
 
+        log.info("Opening YantrikDB at: %s", db_path)
         t0 = time.time()
-        embedder = load_embedder(model_name)
-        embedding_dim = embedder.dim() if hasattr(embedder, 'dim') and callable(embedder.dim) else embedding_dim
-
-        log.info("Opening YantrikDB at: %s (dim=%d)", db_path, embedding_dim)
-        self._db = YantrikDB(db_path=db_path, embedding_dim=embedding_dim, embedder=embedder)
-        log.info("YantrikDB ready (init: %.1fs)", time.time() - t0)
+        self._db = load_engine(db_path, model_name=model_name)
+        log.info("YantrikDB ready (total init: %.1fs)", time.time() - t0)
 
     @property
     def db(self):
