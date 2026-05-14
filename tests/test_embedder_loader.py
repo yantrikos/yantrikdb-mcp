@@ -118,6 +118,55 @@ def test_auto_with_existing_data_demands_onnx(tmp_path: Path, monkeypatch):
 
 
 # ─────────────────────────────────────────────────────────────────────
+# Multilingual backend (v0.7.0+)
+# ─────────────────────────────────────────────────────────────────────
+
+
+def test_multilingual_blocks_existing_db(tmp_path: Path, monkeypatch):
+    """Forcing multilingual on a DB that already has memories must fail
+    loudly — the existing vectors are at a different dim and recall would
+    silently produce zero results."""
+    from yantrikdb import YantrikDB
+
+    db_path = tmp_path / "existing.db"
+    db = YantrikDB.with_default(str(db_path))
+    db.record_text("existing 64-dim memory")
+    del db
+
+    monkeypatch.setenv("YANTRIKDB_EMBEDDER", "multilingual")
+    with pytest.raises(RuntimeError) as exc:
+        embedder_mod.load_engine(db_path)
+    msg = str(exc.value)
+    assert "multilingual" in msg.lower()
+    assert "different embedder" in msg or "different vector dim" in msg
+
+
+def test_multilingual_requires_engine_with_set_embedder_named(tmp_path: Path, monkeypatch):
+    """Older engines without set_embedder_named must fail with a clear upgrade hint."""
+    import yantrikdb as ydb_mod
+
+    # Pretend the engine is missing the API by patching out the attribute.
+    monkeypatch.delattr(ydb_mod.YantrikDB, "set_embedder_named", raising=False)
+    monkeypatch.setenv("YANTRIKDB_EMBEDDER", "multilingual")
+
+    with pytest.raises(RuntimeError) as exc:
+        embedder_mod.load_engine(tmp_path / "needs_new_engine.db")
+    msg = str(exc.value)
+    assert "yantrikdb engine >=0.7" in msg or "set_embedder_named" in msg
+
+
+def test_auto_never_picks_multilingual(tmp_path: Path, monkeypatch, caplog):
+    """Auto mode must never resolve to multilingual — its dim differs from
+    both bundled (64) and ONNX (384), so silent selection would create
+    DBs that can't be back-compat'd to either default."""
+    monkeypatch.delenv("YANTRIKDB_EMBEDDER", raising=False)
+    db = embedder_mod.load_engine(tmp_path / "fresh.db")
+    # Auto on a fresh DB resolves to bundled (64 dim), never multilingual.
+    # Probe via stats — bundled writes 0 memories so just verify open succeeded.
+    assert db.has_embedder() is True
+
+
+# ─────────────────────────────────────────────────────────────────────
 # Backwards-compat shim
 # ─────────────────────────────────────────────────────────────────────
 

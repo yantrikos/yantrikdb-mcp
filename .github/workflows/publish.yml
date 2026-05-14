@@ -15,12 +15,13 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        python-version: ["3.10", "3.12"]
+        python-version: ["3.10", "3.12", "3.14"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
+          allow-prereleases: true
       - run: |
           python -m pip install -U pip
           pip install -e ".[dev]"
@@ -32,7 +33,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        backend: [bundled, onnx]
+        backend: [bundled, onnx, multilingual]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -49,6 +50,11 @@ jobs:
         run: |
           python -m pip install -U pip
           pip install -e ".[dev,onnx]"
+      - name: Install (multilingual — bundled deps, engine fetches model)
+        if: matrix.backend == 'multilingual'
+        run: |
+          python -m pip install -U pip
+          pip install -e ".[dev]"
       - name: Pre-cache MiniLM
         if: matrix.backend == 'onnx'
         run: |
@@ -58,6 +64,7 @@ jobs:
       - name: Run e2e
         env:
           YANTRIKDB_EMBEDDER: ${{ matrix.backend }}
+          YANTRIKDB_TEST_MULTILINGUAL: ${{ matrix.backend == 'multilingual' && '1' || '0' }}
         run: pytest -q tests/test_e2e_mcp.py
 
   publish:

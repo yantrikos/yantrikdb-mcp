@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "yantrikdb-mcp"
-version = "0.6.0"
+version = "0.7.0"
 description = "YantrikDB MCP Server — Cognitive memory for AI agents"
 readme = "README.md"
 license = "MIT"
@@ -20,12 +20,19 @@ classifiers = [
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 dependencies = [
-    # Engine v0.7.4+ ships a bundled Rust embedder (potion-base-2M, 64 dim)
-    # accessible via YantrikDB.with_default(). Default install uses it.
-    "yantrikdb>=0.7.4",
+    # Engine v0.7.15+ pins three required fixes:
+    #   - v0.7.8: idempotent migration runner (yantrikdb#10) — fixes the
+    #     v14→v15 "Cannot add a column to a view" failure that bricked
+    #     first-restart for every pre-v0.7 database.
+    #   - v0.7.9: potion-multilingual-128M added to the embedder registry.
+    #   - v0.7.13 + v0.7.15: multilingual extractor + the restored
+    #     extract call site (yantrikdb#15, #26). Pre-0.7.15 the multilingual
+    #     download silently produced an empty cache dir.
+    "yantrikdb>=0.7.15",
     "mcp[cli]>=1.2.0",
     "click>=8.0.0",
     "requests>=2.28.0",

@@ -12,13 +12,16 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        python-version: ["3.10", "3.12"]
+        # 3.14 is engine-supported since yantrikdb v0.7.11 — the engine
+        # wheel matrix builds against it, so we test against it too.
+        python-version: ["3.10", "3.12", "3.14"]
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
+          allow-prereleases: true
 
       - name: Install package + dev deps (with [onnx] for full coverage)
         run: |
@@ -34,7 +37,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        backend: [bundled, onnx]
+        backend: [bundled, onnx, multilingual]
     steps:
       - uses: actions/checkout@v4
 
@@ -56,6 +59,12 @@ jobs:
           python -m pip install -U pip
           pip install -e ".[dev,onnx]"
 
+      - name: Install package (multilingual uses bundled-only deps; model is engine-downloaded)
+        if: matrix.backend == 'multilingual'
+        run: |
+          python -m pip install -U pip
+          pip install -e ".[dev]"
+
       - name: Pre-cache HuggingFace MiniLM (onnx only)
         if: matrix.backend == 'onnx'
         run: |
@@ -66,4 +75,7 @@ jobs:
       - name: Run e2e (${{ matrix.backend }})
         env:
           YANTRIKDB_EMBEDDER: ${{ matrix.backend }}
+          # Multilingual opt-in for the e2e parametrize (skips download
+          # for non-multilingual runs).
+          YANTRIKDB_TEST_MULTILINGUAL: ${{ matrix.backend == 'multilingual' && '1' || '0' }}
         run: pytest -q tests/test_e2e_mcp.py

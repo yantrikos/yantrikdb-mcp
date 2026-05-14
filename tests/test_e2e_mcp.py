@@ -82,9 +82,27 @@ def _onnx_available() -> bool:
         return False
 
 
+def _multilingual_supported() -> bool:
+    """The engine's set_embedder_named registry lives in compiled Rust;
+    just probe whether the API itself exists. We don't try to predict
+    whether the network fetch will succeed — CI either has connectivity
+    or it doesn't, and the test will fail loudly if extraction breaks.
+    """
+    try:
+        from yantrikdb import YantrikDB
+        return hasattr(YantrikDB, "with_default") and hasattr(YantrikDB, "set_embedder_named")
+    except ImportError:
+        return False
+
+
 BACKENDS = ["bundled"]
 if _onnx_available():
     BACKENDS.append("onnx")
+# Multilingual is gated separately because the engine downloads a ~460 MB
+# model on first use. CI must opt in via YANTRIKDB_TEST_MULTILINGUAL=1 so
+# bog-standard PR runs don't pull half a GB.
+if _multilingual_supported() and os.environ.get("YANTRIKDB_TEST_MULTILINGUAL") == "1":
+    BACKENDS.append("multilingual")
 
 
 # ─────────────────────────────────────────────────────────────────────

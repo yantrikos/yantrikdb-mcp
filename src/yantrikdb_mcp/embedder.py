@@ -1,19 +1,26 @@
 """Embedder + engine loader for YantrikDB MCP server.
 
-v0.5.0+ supports two backends:
+v0.7.0+ supports three backends:
 
-1. **Bundled** (default for new installs) — engine ships its own
-   potion-base-2M Rust embedder (64 dim). ~77 ms cold start, no extra
+1. **Bundled** (default for new English installs) — engine ships its own
+   potion-base-2M Rust embedder (64 dim). ~80 ms cold start, no extra
    Python deps. Use via `YantrikDB.with_default(db_path)`.
 
-2. **ONNX MiniLM-L6-v2** (legacy / opt-in) — 384-dim, higher recall
-   quality. Requires `pip install yantrikdb-mcp[onnx]`.
+2. **ONNX MiniLM-L6-v2** (legacy / opt-in) — 384-dim, higher English
+   recall quality. Requires `pip install yantrikdb-mcp[onnx]`.
+
+3. **Multilingual** (opt-in, v0.7.0+) — `potion-multilingual-128M` from
+   the engine's downloadable registry. 256-dim, 101 languages. Engine
+   downloads the model on first use; no extra Python deps. Requires
+   yantrikdb engine v0.7.9+.
 
 Selection is automatic ("auto" — the default):
   - Existing DB with memories → ONNX 384 (back-compat with prior installs).
   - New / empty DB → bundled 64 (fast, lean).
+  - Multilingual is opt-in only — never auto-selected (different dim,
+    incompatible with existing DBs).
 
-Override with `YANTRIKDB_EMBEDDER=bundled|onnx|auto`.
+Override with `YANTRIKDB_EMBEDDER=auto|bundled|onnx|multilingual`.
 """
 
 import logging
@@ -167,21 +174,32 @@ def _onnx_deps_available() -> bool:
 # ─────────────────────────────────────────────────────────────────────
 
 
+# Engine registry name for the multilingual backend (engine v0.7.9+).
+# Held as a constant so tests can monkeypatch the dim/name without touching
+# load_engine internals.
+MULTILINGUAL_MODEL = "potion-multilingual-128M"
+MULTILINGUAL_DIM = 256
+
+
 def load_engine(db_path: str | os.PathLike, model_name: str = "all-MiniLM-L6-v2"):
     """Open a YantrikDB engine with the right embedder for this install.
 
     Resolves backend in this order:
 
-    1. `YANTRIKDB_EMBEDDER` env var: "bundled", "onnx", or "auto" (default).
+    1. `YANTRIKDB_EMBEDDER` env var: "auto" (default), "bundled", "onnx",
+       or "multilingual".
     2. In auto mode: existing DB with memories → ONNX 384;
        new/empty DB → engine bundled 64-dim.
+       Multilingual is opt-in only — never auto-selected because its
+       256-dim vectors are incompatible with existing bundled (64-dim) or
+       ONNX (384-dim) databases.
 
     Returns the ready-to-use `YantrikDB` instance.
     """
     from yantrikdb import YantrikDB
 
     choice = os.environ.get("YANTRIKDB_EMBEDDER", "auto").strip().lower()
-    if choice not in ("auto", "bundled", "onnx"):
+    if choice not in ("auto", "bundled", "onnx", "multilingual"):
         log.warning("Unknown YANTRIKDB_EMBEDDER=%r, treating as 'auto'", choice)
         choice = "auto"
 
@@ -201,7 +219,7 @@ def load_engine(db_path: str | os.PathLike, model_name: str = "all-MiniLM-L6-v2"
         if not hasattr(YantrikDB, "with_default"):
             # Engine too old — fall through to ONNX (if available) or fail loudly.
             log.warning(
-                "yantrikdb engine too old for bundled embedder (need >=0.7.4). "
+                "yantrikdb engine too old for bundled embedder (need >=0.7.8). "
                 "Falling back to ONNX."
             )
             choice = "onnx"
@@ -210,6 +228,42 @@ def load_engine(db_path: str | os.PathLike, model_name: str = "all-MiniLM-L6-v2"
             db = YantrikDB.with_default(str(db_path))
             log.info("YantrikDB opened with bundled embedder in %.2fs", time.time() - t0)
             return db
+
+    # Multilingual: engine downloads the model on first use, no Python deps.
+    if choice == "multilingual":
+        if not hasattr(YantrikDB, "with_default") or not hasattr(YantrikDB, "set_embedder_named"):
+            raise RuntimeError(
+                "Multilingual embedder requires yantrikdb engine >=0.7.9 "
+                "(with set_embedder_named + with_default). "
+                "Run: pip install --upgrade 'yantrikdb-mcp[onnx]' to refresh "
+                "the engine, or unset YANTRIKDB_EMBEDDER to fall back to auto."
+            )
+        # Opening an existing non-multilingual DB with this backend would
+        # silently produce zero-recall results because the stored vectors
+        # are at a different dim. Block it early with a helpful error.
+        if has_data:
+            raise RuntimeError(
+                f"YANTRIKDB_EMBEDDER=multilingual requested but the existing "
+                f"database at {db_path} contains memories from a different "
+                f"embedder (different vector dim).\n"
+                f"Multilingual ({MULTILINGUAL_DIM} dim) is only valid for "
+                f"fresh databases. Either point YANTRIKDB_DB_PATH at a new "
+                f"file, or unset YANTRIKDB_EMBEDDER to use the back-compat "
+                f"backend for this DB."
+            )
+        t0 = time.time()
+        # Open at the multilingual model's dim explicitly — `with_default()`
+        # would pin dim=64 from the bundled embedder, and the engine
+        # rejects `set_embedder_named` for a mismatched dim. Constructing
+        # bare YantrikDB at dim=256 then attaching the named embedder is
+        # the supported swap path.
+        db = YantrikDB(db_path=str(db_path), embedding_dim=MULTILINGUAL_DIM)
+        db.set_embedder_named(MULTILINGUAL_MODEL)
+        log.info(
+            "YantrikDB opened with multilingual embedder (%s, %d dim) in %.2fs",
+            MULTILINGUAL_MODEL, MULTILINGUAL_DIM, time.time() - t0,
+        )
+        return db
 
     # ONNX path
     if choice == "onnx":

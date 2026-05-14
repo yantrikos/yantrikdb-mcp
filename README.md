@@ -19,7 +19,8 @@ pip install 'yantrikdb-mcp[onnx]'
 
 > **Upgrading from v0.5.x?** Your existing database stays at 384 dim — install
 > the `[onnx]` extra to keep using it transparently. New installs default to
-> the lean bundled embedder. See [Embedder backends](#embedder-backends) below.
+> the lean bundled embedder. v0.7.0+ pins the engine migration fix automatically.
+> See [Embedder backends](#embedder-backends) below.
 
 ## Configure
 
@@ -101,28 +102,31 @@ Supports `sse` and `streamable-http` transports. Note: SSE connections can drop 
 | `YANTRIKDB_SERVER_URL` | Cluster | *(unset → local mode)* | Comma-separated cluster node URLs |
 | `YANTRIKDB_TOKEN` | Cluster | *(none)* | Bearer token for the cluster database |
 | `YANTRIKDB_DB_PATH` | Local | `~/.yantrikdb/memory.db` | Database file path |
-| `YANTRIKDB_EMBEDDER` | Local | `auto` | Backend selector: `auto` \| `bundled` \| `onnx` |
+| `YANTRIKDB_EMBEDDER` | Local | `auto` | Backend selector: `auto` \| `bundled` \| `onnx` \| `multilingual` |
 | `YANTRIKDB_EMBEDDING_MODEL` | Local | `all-MiniLM-L6-v2` | ONNX model name (only used when `YANTRIKDB_EMBEDDER=onnx`) |
 | `YANTRIKDB_API_KEY` | SSE server | *(none)* | Bearer token when serving SSE/HTTP |
 
 ### Embedder backends
 
-Local mode ships two embedders. The MCP picks one automatically; override with `YANTRIKDB_EMBEDDER`.
+Local mode ships three embedders. The MCP picks one automatically; override with `YANTRIKDB_EMBEDDER`.
 
-| Backend | Dim | Cold start | Install size | When it's used |
-|---|---|---|---|---|
-| `bundled` (engine default) | 64 | ~80 ms | ~10 MB | New / empty databases |
-| `onnx` (MiniLM-L6-v2) | 384 | ~2 s | ~150 MB | Existing pre-v0.6 databases (auto-detected), or when set explicitly |
+| Backend | Dim | Cold start | Install size | Language coverage | When it's used |
+|---|---|---|---|---|---|
+| `bundled` (engine default) | 64 | ~80 ms | ~10 MB | English-only | New / empty databases (auto-selected) |
+| `onnx` (MiniLM-L6-v2) | 384 | ~2 s | ~150 MB | English (higher recall) | Existing pre-v0.6 databases (auto-selected), or when set explicitly |
+| `multilingual` (potion-multilingual-128M) | 256 | ~2 s + ~460 MB download on first use | ~10 MB pip + ~500 MB model cache | 101 languages (BGE-M3 tokenizer) | Opt-in only via `YANTRIKDB_EMBEDDER=multilingual` |
 
-**`auto`** (default) reads the SQLite file at `YANTRIKDB_DB_PATH` and picks `onnx` if it already contains memories — preserving recall quality on upgrades — and `bundled` otherwise. Set `YANTRIKDB_EMBEDDER=bundled` or `=onnx` to override.
+**`auto`** (default) reads the SQLite file at `YANTRIKDB_DB_PATH` and picks `onnx` if it already contains memories — preserving recall quality on upgrades — and `bundled` otherwise. **Multilingual is never auto-selected** because its 256-dim vectors are incompatible with existing bundled (64-dim) or ONNX (384-dim) databases; opt-in only on fresh databases.
 
-If you set `YANTRIKDB_EMBEDDER=onnx` (or auto-detection picks it) without installing the extras, the server fails fast with an install hint:
+Set `YANTRIKDB_EMBEDDER=bundled|onnx|multilingual` to override. If you set `YANTRIKDB_EMBEDDER=onnx` (or auto-detection picks it) without installing the extras, the server fails fast with an install hint:
 
 ```
 RuntimeError: Existing DB has memories embedded with the 384-dim ONNX
 model, but ONNX deps are missing.
   Install with:  pip install 'yantrikdb-mcp[onnx]'
 ```
+
+For the multilingual backend, the engine downloads `potion-multilingual-128M` (~460 MB tarball) from `github.com/yantrikos/yantrikdb-models` on first use. The download is SHA-256 verified, extracted into the engine's cache dir, and reused on subsequent starts. No extra Python deps required — the model runs entirely inside the Rust engine.
 
 ## Why Not File-Based Memory?
 
