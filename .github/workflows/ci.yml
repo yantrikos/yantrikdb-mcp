@@ -23,10 +23,10 @@ jobs:
           python-version: ${{ matrix.python-version }}
           allow-prereleases: true
 
-      - name: Install package + dev deps (with [onnx] for full coverage)
+      - name: Install package + dev + ONNX (unit tests exercise both paths)
         run: |
           python -m pip install -U pip
-          pip install -e ".[dev]"
+          pip install -e ".[dev,onnx]"
 
       - name: Run unit tests (excluding e2e)
         run: pytest -q --ignore=tests/test_e2e_mcp.py
@@ -45,13 +45,16 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install package (bundled only)
+      # Each backend installs only the deps required for ITS path. The e2e
+      # parametrize computes BACKENDS from what's importable in the env, so
+      # this way each job runs exactly one backend variant — no cross-
+      # contamination (e.g. an [onnx] case running in the bundled job because
+      # ONNX deps happened to be present).
+      - name: Install package (bundled — base deps only)
         if: matrix.backend == 'bundled'
         run: |
           python -m pip install -U pip
           pip install -e ".[dev]"
-          # Strip ONNX deps so we exercise the bundled-only install path
-          pip uninstall -y onnxruntime tokenizers huggingface-hub numpy || true
 
       - name: Install package + ONNX extras
         if: matrix.backend == 'onnx'
@@ -59,7 +62,7 @@ jobs:
           python -m pip install -U pip
           pip install -e ".[dev,onnx]"
 
-      - name: Install package (multilingual uses bundled-only deps; model is engine-downloaded)
+      - name: Install package (multilingual — base deps only; model is engine-downloaded)
         if: matrix.backend == 'multilingual'
         run: |
           python -m pip install -U pip
