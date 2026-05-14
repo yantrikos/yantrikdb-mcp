@@ -50,8 +50,6 @@ onnx = [
 ]
 dev = [
     "pytest>=8.0",
-    # Dev environments need ONNX so the existing 384-dim test fixtures work.
-    "yantrikdb-mcp[onnx]",
 ]
 torch = ["sentence-transformers>=3.0.0"]
 
