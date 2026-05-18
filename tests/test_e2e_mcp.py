@@ -199,3 +199,231 @@ def test_mcp_stdio_record_recall_roundtrip(tmp_path: Path, backend: str):
 def test_e2e_backends_include_bundled():
     """Sanity: bundled is always tested (no extras required)."""
     assert "bundled" in BACKENDS
+
+
+def test_skill_define_surface_outcome_roundtrip(tmp_path: Path):
+    """Spawn the real entrypoint with the bundled backend, drive the
+    `skill` tool through a full define → surface → outcome → get → list
+    JSON-RPC round-trip. Bundled-only to keep CI cheap; the validator
+    layer is exercised across all backends by unit tests.
+
+    Sets `YANTRIKDB_SKILLS_WRITE_ENABLED=true` because skill writes are
+    off by default — see `test_skill_writes_disabled_by_default` below
+    for the gate behavior.
+    """
+    db_path = tmp_path / "e2e_skills.db"
+
+    env = {
+        **os.environ,
+        "YANTRIKDB_DB_PATH": str(db_path),
+        "YANTRIKDB_EMBEDDER": "bundled",
+        "YANTRIKDB_SKILLS_WRITE_ENABLED": "true",
+        "PYTHONIOENCODING": "utf-8",
+        "HF_HUB_OFFLINE": "1",
+    }
+
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "yantrikdb_mcp"],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        env=env,
+    )
+
+    try:
+        init = _rpc(proc, "initialize", {
+            "protocolVersion": "2024-11-05",
+            "capabilities": {},
+            "clientInfo": {"name": "skill-e2e", "version": "0.0.0"},
+        }, msg_id=1)
+        assert init.get("result"), f"initialize failed: {init}"
+        _send(proc, {"jsonrpc": "2.0", "method": "notifications/initialized"})
+
+        tools_resp = _rpc(proc, "tools/list", {}, msg_id=2)
+        tool_names = {t["name"] for t in tools_resp["result"]["tools"]}
+        assert "skill" in tool_names, "skill tool not registered"
+
+        # 1) define — happy path
+        define_resp = _rpc(proc, "tools/call", {
+            "name": "skill",
+            "arguments": {
+                "action": "define",
+                "skill_id": "workflow.git.commit_clean",
+                "body": (
+                    "Before commit: run pytest, run lint, write a clear "
+                    "subject and body. Never include co-authored-by unless asked."
+                ),
+                "skill_type": "procedure",
+                "applies_to": ["git", "release"],
+            },
+        }, msg_id=3)
+        assert "result" in define_resp, f"define failed: {define_resp}"
+        define_obj = json.loads(define_resp["result"]["content"][0]["text"])
+        assert define_obj.get("stored") is True
+        assert define_obj["skill_id"] == "workflow.git.commit_clean"
+
+        # 2) define — invalid skill_id (hyphen) must fail loudly
+        bad_resp = _rpc(proc, "tools/call", {
+            "name": "skill",
+            "arguments": {
+                "action": "define",
+                "skill_id": "workflow-git.bad",
+                "body": "x" * 60,
+                "skill_type": "procedure",
+                "applies_to": ["git"],
+            },
+        }, msg_id=4)
+        # ToolError surfaces as isError=True on the result envelope
+        assert bad_resp.get("result", {}).get("isError") is True \
+            or "error" in bad_resp, f"hyphen skill_id should fail: {bad_resp}"
+
+        # 3) surface — should find the skill we just defined
+        surface_resp = _rpc(proc, "tools/call", {
+            "name": "skill",
+            "arguments": {
+                "action": "surface",
+                "query": "how to commit code cleanly",
+                "top_k": 5,
+            },
+        }, msg_id=5)
+        assert "result" in surface_resp, f"surface failed: {surface_resp}"
+        surface_obj = json.loads(surface_resp["result"]["content"][0]["text"])
+        assert surface_obj.get("count", 0) >= 1, f"surface returned nothing: {surface_obj}"
+        skill_ids_found = [r["skill_id"] for r in surface_obj["results"]]
+        assert "workflow.git.commit_clean" in skill_ids_found, (
+            f"surfaced skills missing the defined one: {skill_ids_found}"
+        )
+
+        # 4) outcome — append a success event
+        outcome_resp = _rpc(proc, "tools/call", {
+            "name": "skill",
+            "arguments": {
+                "action": "outcome",
+                "skill_id": "workflow.git.commit_clean",
+                "succeeded": True,
+                "note": "caught a flake8 issue pre-push",
+            },
+        }, msg_id=6)
+        assert "result" in outcome_resp, f"outcome failed: {outcome_resp}"
+        outcome_obj = json.loads(outcome_resp["result"]["content"][0]["text"])
+        assert outcome_obj.get("recorded") is True
+
+        # 5) get — fetch by id
+        get_resp = _rpc(proc, "tools/call", {
+            "name": "skill",
+            "arguments": {"action": "get", "skill_id": "workflow.git.commit_clean"},
+        }, msg_id=7)
+        get_obj = json.loads(get_resp["result"]["content"][0]["text"])
+        assert get_obj.get("skill_id") == "workflow.git.commit_clean"
+        assert "applies_to" in get_obj
+
+        # 6) list — catalog browse
+        list_resp = _rpc(proc, "tools/call", {
+            "name": "skill",
+            "arguments": {"action": "list", "limit": 10},
+        }, msg_id=8)
+        list_obj = json.loads(list_resp["result"]["content"][0]["text"])
+        assert list_obj.get("count", 0) >= 1
+        assert any(
+            r["skill_id"] == "workflow.git.commit_clean" for r in list_obj["results"]
+        )
+
+    finally:
+        try:
+            _send(proc, {"jsonrpc": "2.0", "method": "notifications/cancelled"})
+        except Exception:
+            pass
+        proc.stdin.close()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+
+
+def test_skill_writes_disabled_by_default(tmp_path: Path):
+    """Without `YANTRIKDB_SKILLS_WRITE_ENABLED`, the `define` and `outcome`
+    actions must be refused with a clear error. Reads must still work."""
+    db_path = tmp_path / "e2e_skills_gated.db"
+
+    # Strip the gate from the parent env so the subprocess gets default-off
+    # even if our test runner happens to have it set.
+    env = {
+        k: v for k, v in os.environ.items()
+        if k != "YANTRIKDB_SKILLS_WRITE_ENABLED"
+    }
+    env.update({
+        "YANTRIKDB_DB_PATH": str(db_path),
+        "YANTRIKDB_EMBEDDER": "bundled",
+        "PYTHONIOENCODING": "utf-8",
+        "HF_HUB_OFFLINE": "1",
+    })
+
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "yantrikdb_mcp"],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        env=env,
+    )
+
+    try:
+        _rpc(proc, "initialize", {
+            "protocolVersion": "2024-11-05",
+            "capabilities": {},
+            "clientInfo": {"name": "skill-gate-e2e", "version": "0.0.0"},
+        }, msg_id=1)
+        _send(proc, {"jsonrpc": "2.0", "method": "notifications/initialized"})
+
+        # define is gated
+        define_resp = _rpc(proc, "tools/call", {
+            "name": "skill",
+            "arguments": {
+                "action": "define",
+                "skill_id": "workflow.git.commit_clean",
+                "body": "x" * 60,
+                "skill_type": "procedure",
+                "applies_to": ["git"],
+            },
+        }, msg_id=2)
+        is_error = define_resp.get("result", {}).get("isError")
+        body = json.dumps(define_resp)
+        assert is_error is True or "YANTRIKDB_SKILLS_WRITE_ENABLED" in body, (
+            f"define should be gated by default: {define_resp}"
+        )
+
+        # outcome is also gated
+        outcome_resp = _rpc(proc, "tools/call", {
+            "name": "skill",
+            "arguments": {
+                "action": "outcome",
+                "skill_id": "workflow.git.commit_clean",
+                "succeeded": True,
+            },
+        }, msg_id=3)
+        is_error = outcome_resp.get("result", {}).get("isError")
+        body = json.dumps(outcome_resp)
+        assert is_error is True or "YANTRIKDB_SKILLS_WRITE_ENABLED" in body, (
+            f"outcome should be gated by default: {outcome_resp}"
+        )
+
+        # Reads ARE allowed even when the gate is off — they only return
+        # skills someone authorized into the substrate. List should return
+        # an empty result, not an error.
+        list_resp = _rpc(proc, "tools/call", {
+            "name": "skill",
+            "arguments": {"action": "list", "limit": 10},
+        }, msg_id=4)
+        assert "result" in list_resp, f"list failed when gate off: {list_resp}"
+        list_obj = json.loads(list_resp["result"]["content"][0]["text"])
+        assert list_obj.get("count", -1) == 0, (
+            f"list with gate off and no skills should be empty: {list_obj}"
+        )
+
+    finally:
+        try:
+            _send(proc, {"jsonrpc": "2.0", "method": "notifications/cancelled"})
+        except Exception:
+            pass
+        proc.stdin.close()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()

@@ -1,6 +1,7 @@
 """MCP tool implementations for YantrikDB cognitive memory engine."""
 
 import json
+import os
 import time
 
 from mcp.server.fastmcp import Context
@@ -1076,8 +1077,16 @@ def stats(
     db = _get_db(ctx)
 
     if action == "stats":
+        from .skill_security import COUNTERS, config as security_config
         result = db.stats(namespace=namespace)
         result["procedural"] = db.procedural_stats(namespace=namespace)
+        # D4 — skill substrate counters + frozen config snapshot. Lets
+        # operators query "are we under attack?" without parsing the
+        # audit log.
+        result["skill_substrate"] = {
+            "counters": COUNTERS.snapshot(),
+            "config": security_config().snapshot(),
+        }
         return json.dumps(result)
 
     if action == "health":
@@ -1110,3 +1119,557 @@ def stats(
             result = "ok"
         elapsed_ms = round((time.time() - t0) * 1000, 1)
         return json.dumps({"action": maintenance_op, "result": result, "elapsed_ms": elapsed_ms})
+
+
+# ── 16. skill ──
+
+
+def _list_skill_memories(db, *, limit: int = 200):
+    """Normalize `list_memories` to a flat list of memory dicts.
+
+    Engine returns `{"memories": [...], "total": N, "offset": K}` for the
+    embedded path; HTTP backend may return either shape depending on the
+    server endpoint. Defensive enough to handle both.
+    """
+    raw = db.list_memories(limit=limit, namespace=SKILL_NAMESPACE_CONST) or {}
+    if isinstance(raw, dict):
+        return list(raw.get("memories") or [])
+    return list(raw)
+
+
+def _find_skill_rid_by_id(db, skill_id: str) -> str | None:
+    for h in _list_skill_memories(db, limit=500):
+        meta = (h.get("metadata") if isinstance(h, dict) else getattr(h, "metadata", None)) or {}
+        if meta.get("skill_id") == skill_id:
+            return h.get("rid") if isinstance(h, dict) else getattr(h, "rid", None)
+    return None
+
+
+# Module-level constant so the helpers above can reference it without
+# importing inside the hot path of every skill() invocation.
+SKILL_NAMESPACE_CONST = "skill_substrate"
+
+
+def _skill_writes_enabled() -> bool:
+    """Thin wrapper over skill_security.gate_open() that preserves the
+    bool-returning shape for tests. Use `skill_security.gate_open()`
+    directly when you need the reason-if-closed string."""
+    from .skill_security import gate_open
+
+    is_open, _reason = gate_open()
+    return is_open
+
+
+@mcp.tool(annotations=ToolAnnotations(title="Skill", readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=False))
+def skill(
+    action: str,
+    skill_id: str | None = None,
+    body: str | None = None,
+    skill_type: str = "procedure",
+    applies_to: list[str] | None = None,
+    triggers: list[str] | None = None,
+    on_conflict: str = "reject",
+    version: str | None = None,
+    supersedes: str | None = None,
+    query: str | None = None,
+    top_k: int = 5,
+    succeeded: bool | None = None,
+    note: str | None = None,
+    limit: int = 20,
+    ctx: Context = None,
+) -> str:
+    """Substrate-native agent skill catalog — define, surface, record outcomes.
+
+    Skills are structured catalog entries (`skill_id`, `applies_to`, `body`,
+    `type`) — different from loose how-to memories (use `procedure` for those).
+    Writes go to the `skill_substrate` namespace so every yantrikdb consumer
+    (this MCP, yantrikdb-hermes-plugin, Lane B SDK, WisePick) sees the same
+    catalog.
+
+    Schema-validated at write time:
+    - skill_id: lowercase dot-separated segments, e.g. "workflow.git.commit_clean"
+    - body: 50–5000 chars
+    - applies_to: 1–10 lowercase_underscore identifiers (no hyphens)
+    - skill_type: one of procedure | reference | lesson | pattern | rule
+
+    ACTIONS:
+    - "define":  Create a skill (needs skill_id, body, skill_type, applies_to).
+    - "surface": Find relevant skills (needs query). Returns ranked by score.
+    - "outcome": Append a use outcome (needs skill_id, succeeded).
+    - "get":     Fetch a single skill by id.
+    - "list":    Catalog browse (filter by applies_to / skill_type).
+
+    EXAMPLES:
+    - skill(action="define", skill_id="workflow.git.commit_clean",
+            body="Before commit: run pytest, run lint, write a clear "
+                 "subject + body. Never include co-authored-by unless asked.",
+            skill_type="procedure", applies_to=["git", "release"])
+    - skill(action="surface", query="how to commit cleanly")
+    - skill(action="outcome", skill_id="workflow.git.commit_clean",
+            succeeded=True, note="caught a flake8 issue pre-push")
+
+    Args:
+        action: "define", "surface", "outcome", "get", "list".
+        skill_id: Dot-separated id (for define/get/outcome).
+        body: Skill body, 50–5000 chars (for define).
+        skill_type: procedure|reference|lesson|pattern|rule (for define).
+        applies_to: Non-empty identifier list ≤10 entries (for define;
+            optional filter for surface/list).
+        triggers: Optional list of trigger phrases (for define).
+        on_conflict: "reject" (default) or "replace" if skill_id exists.
+        version: Optional semver-shaped version string.
+        supersedes: Optional skill_id this one replaces.
+        query: Natural-language search (for surface).
+        top_k: Max results for surface.
+        succeeded: Outcome boolean (for outcome).
+        note: Optional outcome note.
+        limit: Max results for list.
+    """
+    from .skill_content_scanner import scan_body, scanner_report
+    from .skill_security import (
+        PENDING_NAMESPACE,
+        COUNTERS,
+        audit_event,
+        author_attribution,
+        body_sha256,
+        check_cross_origin_replace,
+        check_namespace_allowed,
+        check_rate_limit,
+        check_supersedes_integrity,
+        config as security_config,
+        gate_open,
+        should_route_to_review,
+        verify_body_hash,
+    )
+    from .skill_validation import (
+        OUTCOME_NAMESPACE,
+        SKILL_NAMESPACE,
+        SKILL_TYPES,
+        validate_skill_define_args,
+        validate_skill_id,
+    )
+
+    if action not in ("define", "surface", "outcome", "get", "list"):
+        raise ToolError(
+            "action must be 'define', 'surface', 'outcome', 'get', or 'list'"
+        )
+
+    # Resolve a session_id for rate limiting + audit attribution. The
+    # MCP client doesn't expose its own identity, but we can take the
+    # request_id off the lifespan context if available, falling back
+    # to the OS user as a last resort.
+    session_id = None
+    if ctx is not None:
+        try:
+            session_id = getattr(ctx.request_context, "request_id", None)
+        except Exception:
+            session_id = None
+    session_id = session_id or "default"
+
+    # ── Gate (C1 + C2 + base) ──
+    if action in ("define", "outcome"):
+        is_open, reason = gate_open()
+        if not is_open:
+            COUNTERS.reject_define(reason="gate_closed") if action == "define" else COUNTERS.reject_outcome("gate_closed")
+            audit_event({
+                "event": "reject",
+                "action": action,
+                "reason": "gate_closed",
+                "detail": reason,
+                "skill_id": skill_id,
+                "session_id": session_id,
+            })
+            raise ToolError(
+                f"action='{action}' refused by skill-writes gate. {reason}"
+            )
+
+        # ── D2 rate limit ──
+        try:
+            check_rate_limit(session_id)
+        except ValueError as e:
+            COUNTERS.reject_define("rate_limit") if action == "define" else COUNTERS.reject_outcome("rate_limit")
+            audit_event({
+                "event": "reject",
+                "action": action,
+                "reason": "rate_limit",
+                "detail": str(e),
+                "skill_id": skill_id,
+                "session_id": session_id,
+            })
+            raise ToolError(str(e)) from e
+
+    db = _get_db(ctx)
+
+    # ── define ──
+    if action == "define":
+        if applies_to is None:
+            applies_to = []
+
+        # Order matters: schema first (cheap, deterministic), then B1
+        # namespace, then content scanning (A1-A5), then B4 supersedes,
+        # then existence/conflict (which requires DB I/O).
+        try:
+            validate_skill_define_args(skill_id or "", body or "", skill_type, applies_to)
+        except ValueError as e:
+            COUNTERS.reject_define("schema")
+            audit_event({"event": "reject", "action": "define", "reason": "schema",
+                         "detail": str(e), "skill_id": skill_id, "session_id": session_id})
+            raise ToolError(str(e)) from e
+
+        if on_conflict not in ("reject", "replace"):
+            raise ToolError("on_conflict must be 'reject' or 'replace'")
+
+        # B1 — namespace allowlist
+        try:
+            check_namespace_allowed(skill_id or "")
+        except ValueError as e:
+            COUNTERS.reject_define("namespace_not_allowed")
+            audit_event({"event": "reject", "action": "define", "reason": "namespace_not_allowed",
+                         "detail": str(e), "skill_id": skill_id, "session_id": session_id})
+            raise ToolError(str(e)) from e
+
+        # A1-A5 — content scanning. Capture the full report for audit
+        # before raising, so we can record which scanners flagged.
+        try:
+            scan_body(body or "")
+        except ValueError as e:
+            report = scanner_report(body or "")
+            flagged = [k for k, v in report.items() if v]
+            COUNTERS.reject_define(f"content_scan:{flagged[0] if flagged else 'unknown'}")
+            audit_event({
+                "event": "reject", "action": "define", "reason": "content_scan",
+                "scanners": flagged, "detail": str(e),
+                "skill_id": skill_id, "session_id": session_id,
+            })
+            raise ToolError(str(e)) from e
+
+        # Find any existing skill with this id (for both conflict resolution
+        # AND for B3 cross-origin checks AND for B4 supersedure lookup).
+        existing_meta: dict | None = None
+        existing_rid: str | None = None
+        try:
+            for h in _list_skill_memories(db, limit=500):
+                m = (h.get("metadata") if isinstance(h, dict) else getattr(h, "metadata", None)) or {}
+                if m.get("skill_id") == skill_id:
+                    existing_meta = m
+                    existing_rid = h.get("rid") if isinstance(h, dict) else getattr(h, "rid", None)
+                    break
+        except Exception:
+            existing_meta = None
+            existing_rid = None
+
+        # B4 — supersedes integrity (look up the superseded skill's metadata)
+        superseded_meta: dict | None = None
+        if supersedes:
+            for h in _list_skill_memories(db, limit=500):
+                m = (h.get("metadata") if isinstance(h, dict) else getattr(h, "metadata", None)) or {}
+                if m.get("skill_id") == supersedes:
+                    superseded_meta = m
+                    break
+            try:
+                check_supersedes_integrity(supersedes, skill_id or "", superseded_meta)
+            except ValueError as e:
+                COUNTERS.reject_define("supersedes_integrity")
+                audit_event({"event": "reject", "action": "define", "reason": "supersedes_integrity",
+                             "detail": str(e), "skill_id": skill_id, "supersedes": supersedes,
+                             "session_id": session_id})
+                raise ToolError(str(e)) from e
+
+        # on_conflict handling + B3 cross-origin check
+        if existing_rid is not None:
+            if on_conflict == "reject":
+                COUNTERS.reject_define("on_conflict_reject")
+                audit_event({"event": "reject", "action": "define", "reason": "on_conflict_reject",
+                             "skill_id": skill_id, "session_id": session_id})
+                raise ToolError(
+                    f"skill {skill_id!r} already exists (on_conflict='reject'). "
+                    "Use on_conflict='replace' or pick a new skill_id."
+                )
+            # replace: enforce B3 first
+            try:
+                check_cross_origin_replace(existing_meta, security_config().author_origin)
+            except ValueError as e:
+                COUNTERS.reject_define("cross_origin_replace")
+                audit_event({"event": "reject", "action": "define", "reason": "cross_origin_replace",
+                             "detail": str(e), "skill_id": skill_id, "session_id": session_id})
+                raise ToolError(str(e)) from e
+            try:
+                db.forget(existing_rid)
+            except Exception as e:
+                raise ToolError(f"on_conflict='replace' failed to tombstone {existing_rid}: {e}") from e
+
+        # G — review queue routing
+        target_namespace = SKILL_NAMESPACE
+        routed_to_review = False
+        if should_route_to_review(skill_type, supersedes):
+            target_namespace = PENDING_NAMESPACE
+            routed_to_review = True
+
+        clean_body = (body or "").strip()
+
+        # B2 + E1 + E2 — author attribution, content hash, origin stamp
+        attribution = author_attribution(session_id=session_id)
+        metadata: dict = {
+            "record_type": "skill",
+            "skill_id": skill_id,
+            "skill_type": skill_type,
+            "applies_to": list(applies_to),
+            "source": "mcp",
+            "body_sha256": body_sha256(clean_body),
+            **attribution,  # session_id, os_user, hostname, wall_clock, author_origin, audit_nonce
+        }
+        if triggers:
+            metadata["triggers"] = list(triggers)
+        if version:
+            metadata["version"] = version
+        if supersedes:
+            metadata["supersedes_skill_id"] = supersedes
+        if routed_to_review:
+            metadata["pending_review"] = True
+
+        rid = db.record(
+            clean_body,
+            memory_type="procedural",
+            importance=0.7,
+            valence=0.0,
+            metadata=metadata,
+            namespace=target_namespace,
+            certainty=0.9,
+            domain="skill",
+            source="user",
+            emotional_state=None,
+        )
+
+        if routed_to_review:
+            COUNTERS.queue_for_review()
+        else:
+            COUNTERS.accept_define()
+
+        audit_event({
+            "event": "accept" if not routed_to_review else "queued_for_review",
+            "action": "define",
+            "skill_id": skill_id,
+            "skill_type": skill_type,
+            "applies_to": list(applies_to),
+            "namespace": target_namespace,
+            "body_sha256": metadata["body_sha256"],
+            "body_length": len(clean_body),
+            "audit_nonce": attribution["audit_nonce"],
+            "session_id": session_id,
+            "supersedes": supersedes,
+            "replaced": existing_rid is not None,
+            "config_snapshot": security_config().snapshot() if security_config().audit_log_path else None,
+        })
+
+        return json.dumps({
+            "rid": rid, "skill_id": skill_id, "stored": True,
+            "replaced": existing_rid is not None,
+            "pending_review": routed_to_review,
+            "namespace": target_namespace,
+        })
+
+    # ── surface ──
+    if action == "surface":
+        if not query or not query.strip():
+            raise ToolError("query required for action='surface'")
+        if applies_to is not None and not isinstance(applies_to, list):
+            raise ToolError("applies_to must be a list")
+        if skill_type and skill_type != "procedure" and skill_type not in SKILL_TYPES:
+            raise ToolError(f"skill_type {skill_type!r} not in {sorted(SKILL_TYPES)}")
+
+        # Reads only see the LIVE catalog, never the pending-review queue.
+        # The pending queue is operator-only (use `skill(action="list",
+        # namespace_hint="pending")` via a future tool extension or
+        # query the DB directly).
+        response = db.recall_with_response(
+            query=query.strip(), top_k=top_k, namespace=SKILL_NAMESPACE,
+        )
+        items = []
+        tampered_skipped = 0
+        for r in (response.get("results") or []):
+            meta = r.get("metadata") or {}
+            if meta.get("record_type") != "skill":
+                continue
+            # E1 — verify body hash. If stored hash and current body
+            # disagree, the body was tampered with out-of-band. Skip
+            # the result and log it; do not surface possibly-poisoned
+            # content to the caller.
+            if not verify_body_hash(r.get("text", ""), meta.get("body_sha256")):
+                tampered_skipped += 1
+                audit_event({
+                    "event": "tamper_detected",
+                    "action": "surface",
+                    "skill_id": meta.get("skill_id"),
+                    "rid": r.get("rid"),
+                    "session_id": session_id,
+                })
+                continue
+            if applies_to:
+                skill_applies = set(meta.get("applies_to") or [])
+                if not (set(applies_to) & skill_applies):
+                    continue
+            if skill_type and skill_type != "procedure":
+                if meta.get("skill_type") != skill_type:
+                    continue
+            items.append({
+                "rid": r["rid"],
+                "skill_id": meta.get("skill_id"),
+                "skill_type": meta.get("skill_type"),
+                "applies_to": meta.get("applies_to", []),
+                "triggers": meta.get("triggers", []),
+                "version": meta.get("version"),
+                "author_origin": meta.get("author_origin"),
+                "body": r["text"],
+                "score": round(r.get("score", 0.0), 4),
+            })
+        out: dict = {
+            "count": len(items),
+            "results": items,
+            "confidence": round(response.get("confidence", 0.0), 4),
+        }
+        if tampered_skipped:
+            out["tampered_skipped"] = tampered_skipped
+        return json.dumps(out)
+
+    # ── outcome ──
+    if action == "outcome":
+        if not skill_id:
+            raise ToolError("skill_id required for action='outcome'")
+        try:
+            validate_skill_id(skill_id)
+        except ValueError as e:
+            COUNTERS.reject_outcome("schema")
+            audit_event({"event": "reject", "action": "outcome", "reason": "schema",
+                         "detail": str(e), "skill_id": skill_id, "session_id": session_id})
+            raise ToolError(str(e)) from e
+        if succeeded is None:
+            raise ToolError("succeeded (bool) required for action='outcome'")
+
+        # D3 — outcome.note is bounded + scanned (same A1/A2/A4 risk as
+        # body content; A3 URLs would be too restrictive on notes so
+        # we keep the env-var gate; A5 is skipped for short notes).
+        if note is not None:
+            if not isinstance(note, str):
+                raise ToolError("note must be a string")
+            if len(note) > 500:
+                COUNTERS.reject_outcome("note_too_long")
+                audit_event({"event": "reject", "action": "outcome", "reason": "note_too_long",
+                             "skill_id": skill_id, "note_length": len(note),
+                             "session_id": session_id})
+                raise ToolError(f"note length {len(note)} exceeds 500-char cap [D3]")
+            try:
+                from .skill_content_scanner import scan_body as _scan
+                _scan(note, is_outcome_note=True)
+            except ValueError as e:
+                COUNTERS.reject_outcome("note_content_scan")
+                audit_event({"event": "reject", "action": "outcome", "reason": "note_content_scan",
+                             "detail": str(e), "skill_id": skill_id, "session_id": session_id})
+                raise ToolError(str(e)) from e
+
+        parts = [f"outcome: skill={skill_id} succeeded={bool(succeeded)}"]
+        if note:
+            parts.append(f"note: {note}")
+        outcome_body = "\n".join(parts)
+
+        attribution = author_attribution(session_id=session_id)
+        meta_out: dict = {
+            "record_type": "skill_outcome",
+            "skill_id": skill_id,
+            "succeeded": bool(succeeded),
+            "source": "mcp",
+            **attribution,
+        }
+        if note:
+            meta_out["note"] = note
+
+        rid = db.record(
+            outcome_body,
+            memory_type="episodic",
+            importance=0.5,
+            valence=0.0,
+            metadata=meta_out,
+            namespace=OUTCOME_NAMESPACE,
+            certainty=1.0,
+            domain="skill_outcome",
+            source="system",
+            emotional_state=None,
+        )
+
+        COUNTERS.record_outcome()
+        audit_event({
+            "event": "accept", "action": "outcome",
+            "skill_id": skill_id, "succeeded": bool(succeeded),
+            "note_present": note is not None, "rid": rid,
+            "audit_nonce": attribution["audit_nonce"],
+            "session_id": session_id,
+        })
+        return json.dumps({"rid": rid, "skill_id": skill_id, "recorded": True})
+
+    # ── get ──
+    if action == "get":
+        if not skill_id:
+            raise ToolError("skill_id required for action='get'")
+        try:
+            validate_skill_id(skill_id)
+        except ValueError as e:
+            raise ToolError(str(e)) from e
+        for h in _list_skill_memories(db, limit=500):
+            meta = (h.get("metadata") if isinstance(h, dict) else getattr(h, "metadata", None)) or {}
+            if meta.get("skill_id") != skill_id:
+                continue
+            body_text = h.get("text") if isinstance(h, dict) else getattr(h, "text", None)
+            # E1 — tamper check on direct lookup too.
+            if not verify_body_hash(body_text or "", meta.get("body_sha256")):
+                audit_event({
+                    "event": "tamper_detected", "action": "get",
+                    "skill_id": skill_id,
+                    "rid": h.get("rid") if isinstance(h, dict) else getattr(h, "rid", None),
+                    "session_id": session_id,
+                })
+                return _err(
+                    f"skill {skill_id!r} body hash mismatch — possible tampering. "
+                    "Refusing to surface. See audit log for details.",
+                    skill_id=skill_id,
+                )
+            return json.dumps({
+                "rid": h.get("rid") if isinstance(h, dict) else getattr(h, "rid", None),
+                "skill_id": skill_id,
+                "skill_type": meta.get("skill_type"),
+                "applies_to": meta.get("applies_to", []),
+                "triggers": meta.get("triggers", []),
+                "version": meta.get("version"),
+                "author_origin": meta.get("author_origin"),
+                "wall_clock_at_define": meta.get("wall_clock_at_define"),
+                "body": body_text,
+            })
+        return _err(f"skill {skill_id!r} not found", skill_id=skill_id)
+
+    # ── list ──
+    if action == "list":
+        rows = _list_skill_memories(db, limit=max(1, min(500, limit * 5)))
+        items = []
+        for h in rows:
+            meta = (h.get("metadata") if isinstance(h, dict) else getattr(h, "metadata", None)) or {}
+            if meta.get("record_type") != "skill":
+                continue
+            if applies_to:
+                skill_applies = set(meta.get("applies_to") or [])
+                if not (set(applies_to) & skill_applies):
+                    continue
+            if skill_type and skill_type != "procedure":
+                if meta.get("skill_type") != skill_type:
+                    continue
+            items.append({
+                "rid": h.get("rid") if isinstance(h, dict) else getattr(h, "rid", None),
+                "skill_id": meta.get("skill_id"),
+                "skill_type": meta.get("skill_type"),
+                "applies_to": meta.get("applies_to", []),
+                "version": meta.get("version"),
+                "author_origin": meta.get("author_origin"),
+            })
+            if len(items) >= limit:
+                break
+        return json.dumps({"count": len(items), "results": items})
+
+    raise ToolError(f"unreachable: action={action!r}")
+
