@@ -1,6 +1,7 @@
 """MCP tool implementations for YantrikDB cognitive memory engine."""
 
 import json
+import os
 import time
 
 from mcp.server.fastmcp import Context
@@ -1110,3 +1111,344 @@ def stats(
             result = "ok"
         elapsed_ms = round((time.time() - t0) * 1000, 1)
         return json.dumps({"action": maintenance_op, "result": result, "elapsed_ms": elapsed_ms})
+
+
+# ── 16. skill ──
+
+
+def _list_skill_memories(db, *, limit: int = 200):
+    """Normalize `list_memories` to a flat list of memory dicts.
+
+    Engine returns `{"memories": [...], "total": N, "offset": K}` for the
+    embedded path; HTTP backend may return either shape depending on the
+    server endpoint. Defensive enough to handle both.
+    """
+    raw = db.list_memories(limit=limit, namespace=SKILL_NAMESPACE_CONST) or {}
+    if isinstance(raw, dict):
+        return list(raw.get("memories") or [])
+    return list(raw)
+
+
+def _find_skill_rid_by_id(db, skill_id: str) -> str | None:
+    for h in _list_skill_memories(db, limit=500):
+        meta = (h.get("metadata") if isinstance(h, dict) else getattr(h, "metadata", None)) or {}
+        if meta.get("skill_id") == skill_id:
+            return h.get("rid") if isinstance(h, dict) else getattr(h, "rid", None)
+    return None
+
+
+# Module-level constant so the helpers above can reference it without
+# importing inside the hot path of every skill() invocation.
+SKILL_NAMESPACE_CONST = "skill_substrate"
+
+
+def _skill_writes_enabled() -> bool:
+    """Skill writes (`define`, `outcome`) are gated behind an explicit env
+    var because they shape future agent behavior across sessions — higher
+    trust than ephemeral memory writes via `remember`.
+
+    Default: **disabled**. Operators opt in via
+    `YANTRIKDB_SKILLS_WRITE_ENABLED=true` (or `1`/`yes`/`on`).
+
+    Reads (`surface`, `get`, `list`) are always allowed — they only see
+    skills that someone already authorized into the substrate.
+    """
+    v = os.environ.get("YANTRIKDB_SKILLS_WRITE_ENABLED", "").strip().lower()
+    return v in ("1", "true", "yes", "on")
+
+
+@mcp.tool(annotations=ToolAnnotations(title="Skill", readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=False))
+def skill(
+    action: str,
+    skill_id: str | None = None,
+    body: str | None = None,
+    skill_type: str = "procedure",
+    applies_to: list[str] | None = None,
+    triggers: list[str] | None = None,
+    on_conflict: str = "reject",
+    version: str | None = None,
+    supersedes: str | None = None,
+    query: str | None = None,
+    top_k: int = 5,
+    succeeded: bool | None = None,
+    note: str | None = None,
+    limit: int = 20,
+    ctx: Context = None,
+) -> str:
+    """Substrate-native agent skill catalog — define, surface, record outcomes.
+
+    Skills are structured catalog entries (`skill_id`, `applies_to`, `body`,
+    `type`) — different from loose how-to memories (use `procedure` for those).
+    Writes go to the `skill_substrate` namespace so every yantrikdb consumer
+    (this MCP, yantrikdb-hermes-plugin, Lane B SDK, WisePick) sees the same
+    catalog.
+
+    Schema-validated at write time:
+    - skill_id: lowercase dot-separated segments, e.g. "workflow.git.commit_clean"
+    - body: 50–5000 chars
+    - applies_to: 1–10 lowercase_underscore identifiers (no hyphens)
+    - skill_type: one of procedure | reference | lesson | pattern | rule
+
+    ACTIONS:
+    - "define":  Create a skill (needs skill_id, body, skill_type, applies_to).
+    - "surface": Find relevant skills (needs query). Returns ranked by score.
+    - "outcome": Append a use outcome (needs skill_id, succeeded).
+    - "get":     Fetch a single skill by id.
+    - "list":    Catalog browse (filter by applies_to / skill_type).
+
+    EXAMPLES:
+    - skill(action="define", skill_id="workflow.git.commit_clean",
+            body="Before commit: run pytest, run lint, write a clear "
+                 "subject + body. Never include co-authored-by unless asked.",
+            skill_type="procedure", applies_to=["git", "release"])
+    - skill(action="surface", query="how to commit cleanly")
+    - skill(action="outcome", skill_id="workflow.git.commit_clean",
+            succeeded=True, note="caught a flake8 issue pre-push")
+
+    Args:
+        action: "define", "surface", "outcome", "get", "list".
+        skill_id: Dot-separated id (for define/get/outcome).
+        body: Skill body, 50–5000 chars (for define).
+        skill_type: procedure|reference|lesson|pattern|rule (for define).
+        applies_to: Non-empty identifier list ≤10 entries (for define;
+            optional filter for surface/list).
+        triggers: Optional list of trigger phrases (for define).
+        on_conflict: "reject" (default) or "replace" if skill_id exists.
+        version: Optional semver-shaped version string.
+        supersedes: Optional skill_id this one replaces.
+        query: Natural-language search (for surface).
+        top_k: Max results for surface.
+        succeeded: Outcome boolean (for outcome).
+        note: Optional outcome note.
+        limit: Max results for list.
+    """
+    from .skill_validation import (
+        OUTCOME_NAMESPACE,
+        SKILL_NAMESPACE,
+        SKILL_TYPES,
+        validate_skill_define_args,
+        validate_skill_id,
+    )
+
+    if action not in ("define", "surface", "outcome", "get", "list"):
+        raise ToolError(
+            "action must be 'define', 'surface', 'outcome', 'get', or 'list'"
+        )
+
+    # Gate writes — `define` and `outcome` shape the substrate across
+    # sessions, so they're off by default. Reads (`surface`/`get`/`list`)
+    # always work; they only see what an authorized writer already
+    # entered. Operators enable agent-authored skills via
+    # `YANTRIKDB_SKILLS_WRITE_ENABLED=true`.
+    if action in ("define", "outcome") and not _skill_writes_enabled():
+        raise ToolError(
+            f"action='{action}' is disabled by default. Skill writes shape "
+            "future agent behavior across sessions and are gated for safety. "
+            "Set YANTRIKDB_SKILLS_WRITE_ENABLED=true in the MCP server's "
+            "environment to enable agent-authored skills. Reads "
+            "('surface', 'get', 'list') are always available."
+        )
+
+    db = _get_db(ctx)
+
+    # ── define ──
+    if action == "define":
+        if applies_to is None:
+            applies_to = []
+        try:
+            validate_skill_define_args(skill_id or "", body or "", skill_type, applies_to)
+        except ValueError as e:
+            raise ToolError(str(e)) from e
+        if on_conflict not in ("reject", "replace"):
+            raise ToolError("on_conflict must be 'reject' or 'replace'")
+
+        # Uniqueness check — best-effort in embedded mode (TOCTOU window
+        # exists; documented as embedded-vs-HTTP semantic difference per
+        # yantrikdb-server v0.3.0 design note).
+        existing_rid: str | None = None
+        try:
+            existing_rid = _find_skill_rid_by_id(db, skill_id)
+        except Exception:
+            existing_rid = None
+
+        if existing_rid is not None:
+            if on_conflict == "reject":
+                raise ToolError(
+                    f"skill {skill_id!r} already exists (on_conflict='reject'). "
+                    "Use on_conflict='replace' or pick a new skill_id."
+                )
+            # replace: tombstone the old, write the new
+            try:
+                db.forget(existing_rid)
+            except Exception as e:
+                raise ToolError(f"on_conflict='replace' failed to tombstone {existing_rid}: {e}") from e
+
+        metadata: dict = {
+            "record_type": "skill",
+            "skill_id": skill_id,
+            "skill_type": skill_type,
+            "applies_to": list(applies_to),
+            "source": "mcp",
+        }
+        if triggers:
+            metadata["triggers"] = list(triggers)
+        if version:
+            metadata["version"] = version
+        if supersedes:
+            metadata["supersedes_skill_id"] = supersedes
+
+        # Use record() so embedder selection (bundled/onnx/multilingual) flows
+        # through the same path the engine uses for other memory writes.
+        rid = db.record(
+            (body or "").strip(),
+            memory_type="procedural",
+            importance=0.7,
+            valence=0.0,
+            metadata=metadata,
+            namespace=SKILL_NAMESPACE,
+            certainty=0.9,
+            domain="skill",
+            source="user",
+            emotional_state=None,
+        )
+        return json.dumps({
+            "rid": rid, "skill_id": skill_id, "stored": True,
+            "replaced": existing_rid is not None,
+        })
+
+    # ── surface ──
+    if action == "surface":
+        if not query or not query.strip():
+            raise ToolError("query required for action='surface'")
+        if applies_to is not None and not isinstance(applies_to, list):
+            raise ToolError("applies_to must be a list")
+        if skill_type and skill_type != "procedure" and skill_type not in SKILL_TYPES:
+            raise ToolError(f"skill_type {skill_type!r} not in {sorted(SKILL_TYPES)}")
+
+        response = db.recall_with_response(
+            query=query.strip(), top_k=top_k, namespace=SKILL_NAMESPACE,
+        )
+        items = []
+        for r in (response.get("results") or []):
+            meta = r.get("metadata") or {}
+            # Defensive filter: only return rows that actually look like skills
+            # (a hand-crafted memory in the same namespace shouldn't be surfaced).
+            if meta.get("record_type") != "skill":
+                continue
+            if applies_to:
+                # Match if ANY of the user's filters appears in the skill's applies_to
+                skill_applies = set(meta.get("applies_to") or [])
+                if not (set(applies_to) & skill_applies):
+                    continue
+            if action == "surface" and skill_type and skill_type != "procedure":
+                # Caller passed an explicit skill_type filter — apply it
+                if meta.get("skill_type") != skill_type:
+                    continue
+            items.append({
+                "rid": r["rid"],
+                "skill_id": meta.get("skill_id"),
+                "skill_type": meta.get("skill_type"),
+                "applies_to": meta.get("applies_to", []),
+                "triggers": meta.get("triggers", []),
+                "version": meta.get("version"),
+                "body": r["text"],
+                "score": round(r.get("score", 0.0), 4),
+            })
+        return json.dumps({
+            "count": len(items),
+            "results": items,
+            "confidence": round(response.get("confidence", 0.0), 4),
+        })
+
+    # ── outcome ──
+    if action == "outcome":
+        if not skill_id:
+            raise ToolError("skill_id required for action='outcome'")
+        try:
+            validate_skill_id(skill_id)
+        except ValueError as e:
+            raise ToolError(str(e)) from e
+        if succeeded is None:
+            raise ToolError("succeeded (bool) required for action='outcome'")
+
+        parts = [f"outcome: skill={skill_id} succeeded={bool(succeeded)}"]
+        if note:
+            parts.append(f"note: {note}")
+        outcome_body = "\n".join(parts)
+
+        meta_out: dict = {
+            "record_type": "skill_outcome",
+            "skill_id": skill_id,
+            "succeeded": bool(succeeded),
+            "source": "mcp",
+        }
+        if note:
+            meta_out["note"] = note
+
+        rid = db.record(
+            outcome_body,
+            memory_type="episodic",
+            importance=0.5,
+            valence=0.0,
+            metadata=meta_out,
+            namespace=OUTCOME_NAMESPACE,
+            certainty=1.0,
+            domain="skill_outcome",
+            source="system",
+            emotional_state=None,
+        )
+        return json.dumps({"rid": rid, "skill_id": skill_id, "recorded": True})
+
+    # ── get ──
+    if action == "get":
+        if not skill_id:
+            raise ToolError("skill_id required for action='get'")
+        try:
+            validate_skill_id(skill_id)
+        except ValueError as e:
+            raise ToolError(str(e)) from e
+        # No primary-key lookup on skill_id directly in the engine — scan
+        # the namespace. Catalogs aren't expected to grow past ~thousands;
+        # if that changes, server-side has /v1/skills/get.
+        for h in _list_skill_memories(db, limit=500):
+            meta = (h.get("metadata") if isinstance(h, dict) else getattr(h, "metadata", None)) or {}
+            if meta.get("skill_id") == skill_id:
+                return json.dumps({
+                    "rid": h.get("rid") if isinstance(h, dict) else getattr(h, "rid", None),
+                    "skill_id": skill_id,
+                    "skill_type": meta.get("skill_type"),
+                    "applies_to": meta.get("applies_to", []),
+                    "triggers": meta.get("triggers", []),
+                    "version": meta.get("version"),
+                    "body": h.get("text") if isinstance(h, dict) else getattr(h, "text", None),
+                })
+        return _err(f"skill {skill_id!r} not found", skill_id=skill_id)
+
+    # ── list ──
+    if action == "list":
+        rows = _list_skill_memories(db, limit=max(1, min(500, limit * 5)))
+        items = []
+        for h in rows:
+            meta = (h.get("metadata") if isinstance(h, dict) else getattr(h, "metadata", None)) or {}
+            if meta.get("record_type") != "skill":
+                continue
+            if applies_to:
+                skill_applies = set(meta.get("applies_to") or [])
+                if not (set(applies_to) & skill_applies):
+                    continue
+            if skill_type and skill_type != "procedure":
+                if meta.get("skill_type") != skill_type:
+                    continue
+            items.append({
+                "rid": h.get("rid") if isinstance(h, dict) else getattr(h, "rid", None),
+                "skill_id": meta.get("skill_id"),
+                "skill_type": meta.get("skill_type"),
+                "applies_to": meta.get("applies_to", []),
+                "version": meta.get("version"),
+            })
+            if len(items) >= limit:
+                break
+        return json.dumps({"count": len(items), "results": items})
+
+    raise ToolError(f"unreachable: action={action!r}")
+

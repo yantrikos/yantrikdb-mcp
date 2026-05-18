@@ -104,6 +104,7 @@ Supports `sse` and `streamable-http` transports. Note: SSE connections can drop 
 | `YANTRIKDB_DB_PATH` | Local | `~/.yantrikdb/memory.db` | Database file path |
 | `YANTRIKDB_EMBEDDER` | Local | `auto` | Backend selector: `auto` \| `bundled` \| `onnx` \| `multilingual` |
 | `YANTRIKDB_EMBEDDING_MODEL` | Local | `all-MiniLM-L6-v2` | ONNX model name (only used when `YANTRIKDB_EMBEDDER=onnx`) |
+| `YANTRIKDB_SKILLS_WRITE_ENABLED` | All | `false` | Set `true` to allow agents to author skills (see [Skill substrate](#skill-substrate-v070) below) |
 | `YANTRIKDB_API_KEY` | SSE server | *(none)* | Bearer token when serving SSE/HTTP |
 
 ### Embedder backends
@@ -152,7 +153,7 @@ Run the benchmark yourself: `python benchmarks/bench_token_savings.py`
 
 ## Tools
 
-15 tools, full engine coverage:
+16 tools, full engine coverage:
 
 | Tool | Actions | Purpose |
 |---|---|---|
@@ -171,8 +172,55 @@ Run the benchmark yourself: `python benchmarks/bench_token_savings.py`
 | `category` | list / members / learn / reset | Substitution categories for conflict detection |
 | `personality` | get / set | AI personality traits from memory patterns |
 | `stats` | stats / health / weights / maintenance | Engine stats, health, weights, and index rebuilds |
+| `skill` | define / surface / outcome / get / list | Substrate-native agent skill catalog (writes off by default — see [Skill substrate](#skill-substrate-v070)) |
 
 See [yantrikdb.com/guides/mcp](https://yantrikdb.com/guides/mcp/) for full documentation.
+
+## Skill substrate (v0.8.0+)
+
+YantrikDB exposes a structured agent skill catalog — separate from loose `procedure` memories. Skills have schema (`skill_id`, `applies_to`, `triggers`, `body`, `type`) and are stored in the dedicated `skill_substrate` namespace so multiple consumers (this MCP, [yantrikdb-hermes-plugin](https://github.com/yantrikos/yantrikdb-hermes-plugin), Lane B SDK, WisePick, yantrikdb-server's `/v1/skills/*` endpoints) all read and write the same substrate. Background: [Sarkar 2026 — Skill as Memory, Not Document](https://doi.org/10.5281/zenodo.20128887).
+
+### Safety: writes off by default
+
+Skill writes shape future agent behavior across sessions, so `skill(action="define")` and `skill(action="outcome")` are **disabled by default**. Reads (`surface`, `get`, `list`) always work — they can only return what an authorized writer already entered.
+
+To enable agent-authored skills, set:
+
+```bash
+YANTRIKDB_SKILLS_WRITE_ENABLED=true
+```
+
+Without that env var, write attempts return a clear error pointing operators at the gate. The intended threat model is hostile prompt injection: an agent that reads user-supplied text shouldn't be able to install a misleading procedure into the shared catalog without explicit operator consent. Enterprise deployments should leave the gate off and author skills out-of-band, or front the substrate with their own approval workflow.
+
+### Schema (validated at write time)
+
+| Field | Constraint |
+|---|---|
+| `skill_id` | Lowercase dot-separated segments, length 4–200, e.g. `workflow.git.commit_clean` |
+| `body` | 50–5000 chars |
+| `applies_to` | 1–10 lowercase-underscore identifiers (**no hyphens** — load-bearing for substrate consistency) |
+| `skill_type` | One of `procedure`, `reference`, `lesson`, `pattern`, `rule` |
+| `on_conflict` | `reject` (default) or `replace` |
+
+### Example session
+
+```python
+# Define (requires gate enabled)
+skill(action="define",
+      skill_id="workflow.git.commit_clean",
+      body="Before commit: run pytest, run lint, write a clear subject + body.",
+      skill_type="procedure",
+      applies_to=["git", "release"])
+
+# Surface relevant skills for the current task
+skill(action="surface", query="how to commit cleanly", top_k=5)
+
+# Record an outcome after using the skill (gated, append-only)
+skill(action="outcome", skill_id="workflow.git.commit_clean",
+      succeeded=True, note="caught a flake8 issue pre-push")
+```
+
+Outcomes are append-only events in the `outcome_substrate` namespace — no auto-rollup on the parent skill, matching yantrikdb-server's "schema not semantics" design rule. Agents (or the operator) can aggregate outcomes themselves to compute success rates.
 
 ## Examples
 
