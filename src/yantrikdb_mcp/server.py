@@ -170,11 +170,33 @@ class _LazyDB:
             self._db.close()
 
 
+def _emit_skill_safety_warnings() -> None:
+    """F — log startup warnings about dangerous skill-substrate
+    configurations. Always called once at lifespan start. Warnings
+    also land in the audit log if one is configured."""
+    from .skill_security import audit_event, config, startup_safety_checks
+
+    is_cluster = bool(os.environ.get("YANTRIKDB_SERVER_URL", "").strip())
+    # We can't easily probe actor_ids before DB open — pass None and
+    # leave the F.1 multi-tenant check to the operator's audit-log
+    # review. Cluster mode + gate-on is the most important warning.
+    warnings = startup_safety_checks(is_cluster_mode=is_cluster, db_actor_ids=None)
+    for w in warnings:
+        log.warning(w)
+    if warnings:
+        audit_event({
+            "event": "startup_safety_warnings",
+            "warnings": warnings,
+            "config_snapshot": config().snapshot(),
+        })
+
+
 @asynccontextmanager
 async def lifespan(app: FastMCP):
     """Provide a lazy-initialized YantrikDB context — model loads on first tool call."""
     lazy = _LazyDB()
     log.info("YantrikDB MCP server started (model loads on first use)")
+    _emit_skill_safety_warnings()
     try:
         yield {"lazy": lazy}
     finally:

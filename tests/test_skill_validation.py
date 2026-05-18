@@ -188,26 +188,41 @@ def test_validate_skill_id_rejects_non_string():
 
 
 @pytest.mark.parametrize("val,expected", [
-    (None, False),
-    ("", False),
-    ("0", False),
-    ("false", False),
-    ("no", False),
-    ("off", False),
-    ("garbage", False),
-    ("1", True),
-    ("true", True),
-    ("TRUE", True),
-    ("yes", True),
-    ("on", True),
-    (" true ", True),  # tolerate whitespace
+    (False, False),
+    (True, True),
 ])
 def test_skill_writes_gate(monkeypatch, val, expected):
-    """Default-off plus explicit truthy values enable writes."""
+    """C2: config is frozen at import. Tests poke the frozen CONFIG
+    directly rather than mutating env, mirroring how the gate behaves
+    in a real running MCP server (config changes require restart)."""
+    from yantrikdb_mcp import skill_security
     from yantrikdb_mcp.tools import _skill_writes_enabled
 
-    if val is None:
-        monkeypatch.delenv("YANTRIKDB_SKILLS_WRITE_ENABLED", raising=False)
-    else:
-        monkeypatch.setenv("YANTRIKDB_SKILLS_WRITE_ENABLED", val)
+    monkeypatch.setattr(skill_security.CONFIG, "writes_enabled", val)
+    # Also clear any time-bound expiry so this test only exercises the bool
+    monkeypatch.setattr(skill_security.CONFIG, "write_expires_at", None)
     assert _skill_writes_enabled() is expected
+
+
+def test_skill_writes_gate_env_parse_truthy(monkeypatch):
+    """Confirm the env-var parser accepts the documented truthy values
+    when a fresh _Config() is constructed (i.e. simulating a startup)."""
+    from yantrikdb_mcp import skill_security
+
+    for val in ("1", "true", "TRUE", "yes", "on", " true "):
+        monkeypatch.setenv("YANTRIKDB_SKILLS_WRITE_ENABLED", val)
+        cfg = skill_security._Config()
+        assert cfg.writes_enabled is True, f"failed for {val!r}"
+
+
+def test_skill_writes_gate_env_parse_falsy(monkeypatch):
+    """Confirm falsy / missing / garbage values keep the gate closed."""
+    from yantrikdb_mcp import skill_security
+
+    monkeypatch.delenv("YANTRIKDB_SKILLS_WRITE_ENABLED", raising=False)
+    assert skill_security._Config().writes_enabled is False
+
+    for val in ("", "0", "false", "no", "off", "garbage"):
+        monkeypatch.setenv("YANTRIKDB_SKILLS_WRITE_ENABLED", val)
+        cfg = skill_security._Config()
+        assert cfg.writes_enabled is False, f"unexpected open for {val!r}"
