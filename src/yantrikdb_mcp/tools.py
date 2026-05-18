@@ -1267,8 +1267,11 @@ def skill(
     session_id = session_id or "default"
 
     # ── Gate (C1 + C2 + base) ──
+    # v0.8.1 (issue #8): define/replace use the strict YANTRIKDB_SKILLS_WRITE_ENABLED
+    # gate; outcome uses the lighter YANTRIKDB_OUTCOMES_WRITE_ENABLED (default
+    # true). `gate_open(action)` dispatches.
     if action in ("define", "outcome"):
-        is_open, reason = gate_open()
+        is_open, reason = gate_open(action)
         if not is_open:
             COUNTERS.reject_define(reason="gate_closed") if action == "define" else COUNTERS.reject_outcome("gate_closed")
             audit_event({

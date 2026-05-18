@@ -339,6 +339,56 @@ def test_skill_define_surface_outcome_roundtrip(tmp_path: Path):
             proc.wait()
 
 
+def test_skill_outcomes_can_be_locked_explicitly(tmp_path: Path):
+    """v0.8.1 issue #8: operators who want a fully-locked substrate can
+    flip OUTCOMES off with the explicit env var, even though it defaults
+    to true. Verifies outcome refusal carries the specific reason text."""
+    db_path = tmp_path / "e2e_skills_outcomes_off.db"
+    env = {
+        k: v for k, v in os.environ.items()
+        if k not in ("YANTRIKDB_SKILLS_WRITE_ENABLED",
+                     "YANTRIKDB_OUTCOMES_WRITE_ENABLED")
+    }
+    env.update({
+        "YANTRIKDB_DB_PATH": str(db_path),
+        "YANTRIKDB_EMBEDDER": "bundled",
+        "YANTRIKDB_OUTCOMES_WRITE_ENABLED": "false",
+        "PYTHONIOENCODING": "utf-8",
+        "HF_HUB_OFFLINE": "1",
+    })
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "yantrikdb_mcp"],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        env=env,
+    )
+    try:
+        _rpc(proc, "initialize", {
+            "protocolVersion": "2024-11-05",
+            "capabilities": {},
+            "clientInfo": {"name": "outcome-lock-e2e", "version": "0.0"},
+        }, msg_id=1)
+        _send(proc, {"jsonrpc": "2.0", "method": "notifications/initialized"})
+
+        outcome_resp = _rpc(proc, "tools/call", {
+            "name": "skill",
+            "arguments": {
+                "action": "outcome",
+                "skill_id": "workflow.git.commit_clean",
+                "succeeded": True,
+            },
+        }, msg_id=2)
+        body = json.dumps(outcome_resp)
+        assert "YANTRIKDB_OUTCOMES_WRITE_ENABLED" in body, (
+            f"explicit OUTCOMES=false must refuse with the outcome gate reason: {outcome_resp}"
+        )
+    finally:
+        try: _send(proc, {"jsonrpc": "2.0", "method": "notifications/cancelled"})
+        except Exception: pass
+        proc.stdin.close()
+        try: proc.wait(timeout=5)
+        except subprocess.TimeoutExpired: proc.kill()
+
+
 def test_skill_writes_disabled_by_default(tmp_path: Path):
     """Without `YANTRIKDB_SKILLS_WRITE_ENABLED`, the `define` and `outcome`
     actions must be refused with a clear error. Reads must still work."""
@@ -371,7 +421,7 @@ def test_skill_writes_disabled_by_default(tmp_path: Path):
         }, msg_id=1)
         _send(proc, {"jsonrpc": "2.0", "method": "notifications/initialized"})
 
-        # define is gated
+        # v0.8.1 (issue #8): define is gated; outcome is NOT gated by default
         define_resp = _rpc(proc, "tools/call", {
             "name": "skill",
             "arguments": {
@@ -388,7 +438,11 @@ def test_skill_writes_disabled_by_default(tmp_path: Path):
             f"define should be gated by default: {define_resp}"
         )
 
-        # outcome is also gated
+        # Outcome calls against a non-existent skill still produce *some*
+        # response (the schema-validate path runs against the skill_id);
+        # the key v0.8.1 behaviour is that they are NOT refused by the
+        # YANTRIKDB_SKILLS_WRITE_ENABLED gate. They go through the
+        # YANTRIKDB_OUTCOMES_WRITE_ENABLED gate which defaults to true.
         outcome_resp = _rpc(proc, "tools/call", {
             "name": "skill",
             "arguments": {
@@ -397,21 +451,25 @@ def test_skill_writes_disabled_by_default(tmp_path: Path):
                 "succeeded": True,
             },
         }, msg_id=3)
-        is_error = outcome_resp.get("result", {}).get("isError")
+        is_error = outcome_resp.get("result", {}).get("isError", False)
         body = json.dumps(outcome_resp)
-        assert is_error is True or "YANTRIKDB_SKILLS_WRITE_ENABLED" in body, (
-            f"outcome should be gated by default: {outcome_resp}"
+        # Must NOT contain the skill-writes-gate refusal text
+        assert "YANTRIKDB_SKILLS_WRITE_ENABLED is false" not in body, (
+            f"v0.8.1: outcome must not be blocked by the define gate: {outcome_resp}"
         )
+        # Either it succeeded (skill happened to exist from a prior test) or
+        # it ran far enough to write the outcome event. Either way it didn't
+        # short-circuit on the gate.
+        assert is_error is False, f"outcome should succeed when default gates apply: {outcome_resp}"
 
-        # Reads ARE allowed even when the gate is off — they only return
-        # skills someone authorized into the substrate. List should return
-        # an empty result, not an error.
+        # Reads ARE allowed even when the define gate is off
         list_resp = _rpc(proc, "tools/call", {
             "name": "skill",
             "arguments": {"action": "list", "limit": 10},
         }, msg_id=4)
         assert "result" in list_resp, f"list failed when gate off: {list_resp}"
         list_obj = json.loads(list_resp["result"]["content"][0]["text"])
+        # No defines happened this session, so count == 0
         assert list_obj.get("count", -1) == 0, (
             f"list with gate off and no skills should be empty: {list_obj}"
         )

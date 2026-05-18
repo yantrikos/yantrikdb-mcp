@@ -104,7 +104,8 @@ Supports `sse` and `streamable-http` transports. Note: SSE connections can drop 
 | `YANTRIKDB_DB_PATH` | Local | `~/.yantrikdb/memory.db` | Database file path |
 | `YANTRIKDB_EMBEDDER` | Local | `auto` | Backend selector: `auto` \| `bundled` \| `onnx` \| `multilingual` |
 | `YANTRIKDB_EMBEDDING_MODEL` | Local | `all-MiniLM-L6-v2` | ONNX model name (only used when `YANTRIKDB_EMBEDDER=onnx`) |
-| `YANTRIKDB_SKILLS_WRITE_ENABLED` | All | `false` | Set `true` to allow agents to author skills (see [Skill substrate](#skill-substrate-v070) below) |
+| `YANTRIKDB_SKILLS_WRITE_ENABLED` | All | `false` | Set `true` to allow agents to author skills via `skill(action="define")` (see [Skill substrate](#skill-substrate-v070) below) |
+| `YANTRIKDB_OUTCOMES_WRITE_ENABLED` | All | `true` | Outcome tracking via `skill(action="outcome")`. Defaults on so the feedback loop works out of the box; set `false` to lock the outcome substrate. Added in v0.8.1 per [#8](https://github.com/yantrikos/yantrikdb-mcp/issues/8) |
 | `YANTRIKDB_API_KEY` | SSE server | *(none)* | Bearer token when serving SSE/HTTP |
 
 ### Embedder backends
@@ -198,8 +199,9 @@ Skill writes shape future agent behavior across sessions, so the MCP server impl
 | **B2** Author attribution | Records `session_id`, `os_user`, `hostname`, `wall_clock`, `audit_nonce` | (always on) | Forensic trail |
 | **B3** Cross-origin replace | Refuse to overwrite a skill written by a different consumer | `YANTRIKDB_SKILLS_ALLOW_CROSS_ORIGIN_REPLACE=true` to allow | Defends against MCP↔hermes-plugin collision |
 | **B4** Supersedes integrity | `supersedes` must reference an existing skill in the same namespace | (always on) | Blocks malicious retirement of legit skills |
-| **C1** Time-bound gate | Gate auto-closes at the timestamp | `YANTRIKDB_SKILLS_WRITE_EXPIRES_AT=2026-12-31T00:00:00Z` | Unset = no expiry |
-| **C2** Locked config | All `YANTRIKDB_SKILLS_*` env vars read once at startup | (always on) | Mutating env in a sub-process can't bypass the gate |
+| **C1** Time-bound gate | Gate auto-closes at the timestamp (applies to both define + outcome) | `YANTRIKDB_SKILLS_WRITE_EXPIRES_AT=2026-12-31T00:00:00Z` | Unset = no expiry |
+| **C1.5** Split outcome gate | `outcome` action uses its own gate, default ON | `YANTRIKDB_OUTCOMES_WRITE_ENABLED=false` to lock outcomes too | v0.8.1+: `define` and `outcome` have different threat profiles — outcome can't introduce new instructions, only append `{succeeded, note≤500}` against an existing skill. Feedback loop works by default; lock explicitly if needed |
+| **C2** Locked config | All `YANTRIKDB_SKILLS_*` / `YANTRIKDB_OUTCOMES_*` env vars read once at startup | (always on) | Mutating env in a sub-process can't bypass the gate |
 | **D1** Audit log | JSONL append of every accept/reject/tamper event | `YANTRIKDB_SKILLS_AUDIT_LOG=/var/log/yantrikdb/skills.jsonl` | Unset = no auditing (warns at boot) |
 | **D2** Rate limit | Per-session-id sliding-window write cap | `YANTRIKDB_SKILLS_WRITE_RATE=30` (default writes/min) | Defeats flood attacks |
 | **D3** Outcome.note guards | Note ≤500 chars + scanned by A1/A2/A4 | (always on) | Closes the outcome side-channel |
