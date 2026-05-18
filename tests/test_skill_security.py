@@ -277,6 +277,75 @@ def test_c2_config_frozen_after_init(monkeypatch):
 
 
 # ─────────────────────────────────────────────────────────────────────
+# Issue #8 — split outcome gate (v0.8.1)
+# ─────────────────────────────────────────────────────────────────────
+
+
+def test_outcome_gate_default_open(monkeypatch):
+    """Per issue #8: outcomes are default-on so the feedback loop works
+    out of the box, even when YANTRIKDB_SKILLS_WRITE_ENABLED is false."""
+    from yantrikdb_mcp import skill_security
+    monkeypatch.setattr(skill_security.CONFIG, "writes_enabled", False)
+    monkeypatch.setattr(skill_security.CONFIG, "outcomes_enabled", True)
+    monkeypatch.setattr(skill_security.CONFIG, "write_expires_at", None)
+    # define remains closed
+    assert skill_security.gate_open("define")[0] is False
+    # outcome is open
+    assert skill_security.gate_open("outcome") == (True, None)
+
+
+def test_outcome_gate_can_be_closed_explicitly(monkeypatch):
+    """Operators who want a fully-locked substrate can flip outcomes
+    off via YANTRIKDB_OUTCOMES_WRITE_ENABLED=false."""
+    from yantrikdb_mcp import skill_security
+    monkeypatch.setattr(skill_security.CONFIG, "writes_enabled", True)
+    monkeypatch.setattr(skill_security.CONFIG, "outcomes_enabled", False)
+    monkeypatch.setattr(skill_security.CONFIG, "write_expires_at", None)
+    # define stays open
+    assert skill_security.gate_open("define") == (True, None)
+    # outcome refused with the specific reason
+    is_open, reason = skill_security.gate_open("outcome")
+    assert is_open is False
+    assert "YANTRIKDB_OUTCOMES_WRITE_ENABLED" in reason
+
+
+def test_outcome_gate_env_default_true(monkeypatch):
+    """A fresh _Config() with no env set must produce outcomes_enabled=True."""
+    from yantrikdb_mcp import skill_security
+    monkeypatch.delenv("YANTRIKDB_OUTCOMES_WRITE_ENABLED", raising=False)
+    cfg = skill_security._Config()
+    assert cfg.outcomes_enabled is True
+
+
+def test_outcome_gate_env_explicit_false(monkeypatch):
+    from yantrikdb_mcp import skill_security
+    monkeypatch.setenv("YANTRIKDB_OUTCOMES_WRITE_ENABLED", "false")
+    cfg = skill_security._Config()
+    assert cfg.outcomes_enabled is False
+
+
+def test_expiry_closes_outcome_gate_too(monkeypatch):
+    """C1 time-bound expiry shuts BOTH gates — once writes are flowing,
+    the forensic / audit concerns apply uniformly."""
+    from datetime import datetime, timedelta, timezone
+    from yantrikdb_mcp import skill_security
+    monkeypatch.setattr(skill_security.CONFIG, "writes_enabled", True)
+    monkeypatch.setattr(skill_security.CONFIG, "outcomes_enabled", True)
+    past = datetime.now(timezone.utc) - timedelta(minutes=5)
+    monkeypatch.setattr(skill_security.CONFIG, "write_expires_at", past)
+    for action in ("define", "outcome"):
+        is_open, reason = skill_security.gate_open(action)
+        assert is_open is False, f"{action} should be closed by expiry"
+        assert "EXPIRES_AT" in reason
+
+
+def test_snapshot_includes_outcomes_enabled():
+    from yantrikdb_mcp.skill_security import _Config
+    snap = _Config().snapshot()
+    assert "outcomes_enabled" in snap, "audit log snapshot must record both gates"
+
+
+# ─────────────────────────────────────────────────────────────────────
 # D — operational
 # ─────────────────────────────────────────────────────────────────────
 

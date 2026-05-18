@@ -73,7 +73,19 @@ class _Config:
     def __init__(self) -> None:
         # The gate itself (already used by tools.py)
         self.writes_enabled = _read_bool("YANTRIKDB_SKILLS_WRITE_ENABLED")
-        # C1 — time-bound gate
+        # Outcome gate — split from writes_enabled in v0.8.1 (issue #8).
+        # `outcome` calls cannot introduce new instructions (they only
+        # append {succeeded, note≤500} against an already-validated
+        # skill_id, with the same A1/A2/A4 content scan + D2 rate
+        # limit applied), so their threat profile is meaningfully
+        # different from `define`. Default TRUE so the feedback loop
+        # works out of the box; operators can flip to false if they
+        # want to lock the outcome substrate too.
+        self.outcomes_enabled = _read_bool_default(
+            "YANTRIKDB_OUTCOMES_WRITE_ENABLED", default=True
+        )
+        # C1 — time-bound gate (applies to both define + outcome —
+        # forensic concerns are the same once writes are flowing)
         self.write_expires_at = _read_iso("YANTRIKDB_SKILLS_WRITE_EXPIRES_AT")
         # B1 — namespace allowlist
         ns_raw = _read_list("YANTRIKDB_SKILLS_ALLOWED_NAMESPACES")
@@ -111,6 +123,7 @@ class _Config:
         """JSON-able snapshot for the audit log."""
         return {
             "writes_enabled": self.writes_enabled,
+            "outcomes_enabled": self.outcomes_enabled,
             "write_expires_at": self.write_expires_at.isoformat() if self.write_expires_at else None,
             "allowed_namespaces": list(self.allowed_namespaces),
             "allow_cross_origin_replace": self.allow_cross_origin_replace,
@@ -145,15 +158,36 @@ def config() -> _Config:
 # ─────────────────────────────────────────────────────────────────────
 
 
-def gate_open() -> tuple[bool, str | None]:
-    """Returns (is_open, reason_if_closed). Combines the writes_enabled
-    bool with the optional expiry timestamp."""
-    if not CONFIG.writes_enabled:
-        return False, (
-            "YANTRIKDB_SKILLS_WRITE_ENABLED is false. Skill writes are "
-            "off by default; set the env var to true on the MCP server "
-            "to enable agent-authored skills."
-        )
+def gate_open(action: str = "define") -> tuple[bool, str | None]:
+    """Returns (is_open, reason_if_closed) for the given action.
+
+    Two gates in v0.8.1+ (yantrikos/yantrikdb-mcp#8):
+      - `define` (and `replace`): YANTRIKDB_SKILLS_WRITE_ENABLED, default FALSE
+      - `outcome`: YANTRIKDB_OUTCOMES_WRITE_ENABLED, default TRUE
+
+    Both share the C1 time-bound expiry — once it fires, all writes
+    are refused regardless of which flag opened them.
+
+    Default arg is "define" so existing callers (and tests) that don't
+    pass action keep the v0.8.0 semantics.
+    """
+    if action == "outcome":
+        if not CONFIG.outcomes_enabled:
+            return False, (
+                "YANTRIKDB_OUTCOMES_WRITE_ENABLED is false. Skill outcome "
+                "tracking is disabled on this MCP server. Set the env var "
+                "to true (or unset — it defaults to true) to enable the "
+                "feedback loop."
+            )
+    else:
+        # All other write actions (define, replace) use the stricter gate
+        if not CONFIG.writes_enabled:
+            return False, (
+                "YANTRIKDB_SKILLS_WRITE_ENABLED is false. Skill writes are "
+                "off by default; set the env var to true on the MCP server "
+                "to enable agent-authored skills."
+            )
+
     if CONFIG.write_expires_at is not None:
         now = datetime.now(timezone.utc)
         if now >= CONFIG.write_expires_at:
