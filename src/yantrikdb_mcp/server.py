@@ -1,5 +1,6 @@
 """FastMCP server definition with YantrikDB lifespan context."""
 
+import atexit
 import logging
 import os
 import sys
@@ -166,15 +167,40 @@ class _LazyDB:
         return self._db
 
     def close(self):
-        if self._db is not None:
-            self._db.close()
+        """Idempotent — safe to call multiple times (atexit + any other
+        cleanup path). After the first call, `_db` is nulled so a second
+        call is a no-op and there's no double-close on the SQLite handle.
+        Also tolerates engines that don't expose a `close()` method
+        (HTTP backend) by swallowing AttributeError."""
+        with self._init_lock:
+            db, self._db = self._db, None
+        if db is None:
+            return
+        try:
+            db.close()
+        except AttributeError:
+            # HTTP backend doesn't need explicit close; engine handle
+            # has no close on older variants either.
+            pass
+
+
+_safety_warnings_emitted = False
+_safety_warnings_lock = threading.Lock()
 
 
 def _emit_skill_safety_warnings() -> None:
     """F — log startup warnings about dangerous skill-substrate
-    configurations. Always called once at lifespan start. Warnings
-    also land in the audit log if one is configured."""
+    configurations. Emitted once per process lifetime — under SSE
+    transport the lifespan may be entered multiple times (per-session)
+    and we don't want to spam the journal or pollute the audit log
+    with duplicate startup-warning events on every reconnect."""
+    global _safety_warnings_emitted
     from .skill_security import audit_event, config, startup_safety_checks
+
+    with _safety_warnings_lock:
+        if _safety_warnings_emitted:
+            return
+        _safety_warnings_emitted = True
 
     is_cluster = bool(os.environ.get("YANTRIKDB_SERVER_URL", "").strip())
     # We can't easily probe actor_ids before DB open — pass None and
@@ -191,17 +217,55 @@ def _emit_skill_safety_warnings() -> None:
         })
 
 
+# Process-singleton `_LazyDB`. Under SSE transport, FastMCP/uvicorn
+# enters the `lifespan` context once per client session. The v0.8.1
+# implementation constructed a fresh `_LazyDB` on every entry and
+# called `close()` on every exit — when sessions overlap (rapid
+# reconnects, kill mid-drain, macOS sleep/wake), multiple instances
+# raced to checkpoint+close the same SQLite WAL, partially overwriting
+# the main DB on any interrupted close. Pinned as a singleton here per
+# yantrikos/yantrikdb-mcp#11. The Rust engine is internally
+# Mutex/RwLock-protected (per the docstring on `_LazyDB`), so one
+# shared instance across sessions is the *intended* threading model
+# — we're just making the implementation match.
+_lazy_singleton: "_LazyDB | None" = None
+_lazy_singleton_lock = threading.Lock()
+
+
+def _get_lazy_singleton() -> "_LazyDB":
+    global _lazy_singleton
+    if _lazy_singleton is None:
+        with _lazy_singleton_lock:
+            if _lazy_singleton is None:
+                _lazy_singleton = _LazyDB()
+                # Register a single orderly close at interpreter exit.
+                # We deliberately do NOT register signal handlers — they
+                # interact badly with uvicorn's own SIGTERM handling.
+                # `atexit` runs once after Python's normal shutdown which
+                # is the right hook for "the only owner of the SQLite
+                # handle is closing now."
+                atexit.register(_lazy_singleton.close)
+    return _lazy_singleton
+
+
 @asynccontextmanager
 async def lifespan(app: FastMCP):
-    """Provide a lazy-initialized YantrikDB context — model loads on first tool call."""
-    lazy = _LazyDB()
+    """Provide a process-singleton YantrikDB context.
+
+    Under stdio transport this runs once. Under SSE transport FastMCP
+    may re-enter this for each new client session — that's fine, every
+    session yields the same `_LazyDB` instance. Close happens once via
+    `atexit`, not per-session. See yantrikos/yantrikdb-mcp#11.
+    """
+    lazy = _get_lazy_singleton()
     log.info("YantrikDB MCP server started (model loads on first use)")
     _emit_skill_safety_warnings()
     try:
         yield {"lazy": lazy}
     finally:
-        log.info("Shutting down YantrikDB")
-        lazy.close()
+        # No per-session close. The singleton lives for the lifetime of
+        # the process and is closed exactly once by the atexit hook.
+        pass
 
 
 mcp = FastMCP("yantrikdb", instructions=INSTRUCTIONS, lifespan=lifespan)
