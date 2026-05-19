@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "yantrikdb-mcp"
-version = "0.8.1"
+version = "0.8.2"
 description = "YantrikDB MCP Server — Cognitive memory for AI agents"
 readme = "README.md"
 license = "MIT"
@@ -24,7 +24,11 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 dependencies = [
-    # Engine v0.7.15+ pins three required fixes:
+    # Engine v0.7.17+ pins the cumulative-fix set the MCP server is tested
+    # against. Prior pins held loose at v0.7.15+; v0.8.2 tightens to
+    # v0.7.17 to align the release train with yantrikdb-server v0.8.17
+    # (shipped 2026-05-18, which carries engine v0.7.17). Required fixes
+    # since v0.7.8:
     #   - v0.7.8: idempotent migration runner (yantrikdb#10) — fixes the
     #     v14→v15 "Cannot add a column to a view" failure that bricked
     #     first-restart for every pre-v0.7 database.
@@ -32,7 +36,10 @@ dependencies = [
     #   - v0.7.13 + v0.7.15: multilingual extractor + the restored
     #     extract call site (yantrikdb#15, #26). Pre-0.7.15 the multilingual
     #     download silently produced an empty cache dir.
-    "yantrikdb>=0.7.15",
+    #   - v0.7.16: v26 schema migration foundation (additive, replay-safe).
+    #   - v0.7.17: db.reembed() — atomic engine-side embedder migration.
+    #     Not exposed as an MCP tool in v0.8.x; surfaces in a later version.
+    "yantrikdb>=0.7.17",
     "mcp[cli]>=1.2.0",
     "click>=8.0.0",
     "requests>=2.28.0",
