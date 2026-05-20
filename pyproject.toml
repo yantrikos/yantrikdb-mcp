@@ -4,15 +4,22 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "yantrikdb-mcp"
-version = "0.8.3"
-description = "YantrikDB MCP Server — Cognitive memory for AI agents"
+version = "0.8.4"
+description = "YantrikDB — Cognitive memory for AI agents. Persistent semantic recall, knowledge graph, contradiction detection, and procedural learning. Ships as embeddable engine, network database, or MCP server."
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.10"
 authors = [
     { name = "Pranab Sarkar", email = "developer@pranab.co.in" },
 ]
-keywords = ["ai", "memory", "mcp", "cognitive", "agent", "claude", "cursor"]
+keywords = [
+    "mcp", "mcp-server", "model-context-protocol",
+    "agent-memory", "ai-memory", "llm-memory", "cognitive-memory", "persistent-memory",
+    "ai-agents", "agent-skills", "skill-substrate",
+    "knowledge-graph", "vector-database", "embeddings", "semantic-search",
+    "claude", "claude-code", "cursor", "windsurf", "anthropic",
+    "sqlite", "rust", "python",
+]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
