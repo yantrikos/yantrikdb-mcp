@@ -1,9 +1,24 @@
 <!-- mcp-name: io.github.yantrikos/yantrikdb-mcp -->
 # YantrikDB MCP Server
 
-Cognitive memory for AI agents. Works with Claude Code, Cursor, Windsurf, and any MCP-compatible client.
+**YantrikDB — Cognitive memory for AI agents. Persistent semantic recall, knowledge graph, contradiction detection, and procedural learning. Ships as embeddable engine, network database, or MCP server.**
 
-**Website:** [yantrikdb.com](https://yantrikdb.com) · **Docs:** [yantrikdb.com/guides/mcp](https://yantrikdb.com/guides/mcp/) · **GitHub:** [yantrikos/yantrikdb-mcp](https://github.com/yantrikos/yantrikdb-mcp)
+Works with Claude Code, Cursor, Windsurf, and any MCP-compatible client.
+
+**Website:** [yantrikdb.com](https://yantrikdb.com) · **Docs:** [yantrikdb.com/guides/mcp](https://yantrikdb.com/guides/mcp/) · **GitHub:** [yantrikos/yantrikdb-mcp](https://github.com/yantrikos/yantrikdb-mcp) · **Paper:** [Skill as Memory, Not Document](https://doi.org/10.5281/zenodo.20128887)
+
+## At a glance
+
+| | |
+|---|---|
+| **What it is** | An MCP server that gives any MCP-compatible AI agent persistent, structured, queryable memory across sessions |
+| **Install** | `pip install yantrikdb-mcp` |
+| **Works with** | Claude Code, Cursor, Windsurf, Continue, Claude Desktop, any MCP client |
+| **Storage** | Local SQLite at `~/.yantrikdb/memory.db` (or any path; or HTTP cluster) |
+| **Embedder** | Bundled 64-dim Rust embedder (default), 384-dim ONNX MiniLM (`[onnx]` extra), 256-dim multilingual (101 languages) |
+| **Tools** | 16 — remember, recall, forget, correct, think, memory, graph, conflict, trigger, session, temporal, procedure, category, personality, stats, skill |
+| **License** | MIT (engine: AGPL-3.0) |
+| **Privacy** | All data on your machine. No telemetry. No external services. |
 
 ## Install
 
@@ -277,6 +292,87 @@ skill(action="outcome", skill_id="workflow.git.commit_clean",
 ```
 
 Outcomes are append-only events in the `outcome_substrate` namespace — no auto-rollup on the parent skill, matching yantrikdb-server's "schema not semantics" design rule. Agents (or the operator) can aggregate outcomes themselves to compute success rates.
+
+## FAQ
+
+### What is YantrikDB MCP?
+
+YantrikDB MCP is a Model Context Protocol (MCP) server that gives AI agents persistent cognitive memory across sessions. It exposes 16 tools (remember, recall, forget, correct, think, graph, conflict, trigger, session, temporal, procedure, category, personality, stats, memory, skill) that any MCP-compatible client — Claude Code, Cursor, Windsurf, Continue, Claude Desktop — can call automatically without prompting.
+
+### How is this different from file-based memory like CLAUDE.md?
+
+File-based memory loads *everything* into context on every conversation, which scales O(n) in token cost. YantrikDB uses selective semantic recall — at 5,000 memories, file-based costs ~101K tokens per conversation while YantrikDB costs ~53 tokens. Precision *improves* with more data instead of degrading as the context window fills up. Benchmark script: `python benchmarks/bench_token_savings.py`.
+
+### How does it compare to mem0 / Letta / Zep / native MCP memory?
+
+See [comparison table](#comparison-with-other-agent-memory-systems) below. Short version: YantrikDB is the only one that ships as both an embeddable Rust engine *and* an MCP server *and* a network database with the same substrate semantics. It's the only one with first-class procedural memory + a skill substrate validated by schema at write time + autonomous consolidation/conflict detection. It's also the only one whose underlying engine is published as a peer-reviewed paper ([Sarkar 2026, Zenodo DOI 10.5281/zenodo.20128887](https://doi.org/10.5281/zenodo.20128887)).
+
+### Can I self-host?
+
+Yes — three ways. (1) Local: just `pip install yantrikdb-mcp` and point your MCP client at it. SQLite lives at `~/.yantrikdb/memory.db`. (2) Network: run [yantrikdb-server](https://github.com/yantrikos/yantrikdb-server) as a multi-tenant HTTP cluster, point the MCP at it via `YANTRIKDB_SERVER_URL`. (3) Hybrid: SSE server mode (`yantrikdb-mcp --transport sse`) for shared deployments.
+
+### Is my data sent anywhere?
+
+No. All data stays on your machine (or your cluster). No telemetry, no third-party services. The default embedder runs entirely in the Rust engine via static lookup — no model downloads or API calls. The optional `[onnx]` and multilingual embedders fetch model weights once from HuggingFace's CDN and run locally thereafter.
+
+### What's the difference between `procedure` and `skill`?
+
+`procedure` stores loose how-to memories (effectiveness-ranked, no schema). `skill` stores structured catalog entries (`skill_id`, `applies_to`, `triggers`, `body`, `type`) in a dedicated `skill_substrate` namespace shared with [yantrikdb-hermes-plugin](https://github.com/yantrikos/yantrikdb-hermes-plugin), Lane B SDK, WisePick, and the [yantrikdb-server `/v1/skills/*` endpoints](https://github.com/yantrikos/yantrikdb-server). Use `procedure` for personal how-to notes; use `skill` for structured agent capabilities that other consumers should be able to surface.
+
+### Is skill authoring safe to enable?
+
+Skill writes are off by default precisely because they can shape future agent behavior. When you turn the gate on, seven layers of defense-in-depth apply: prompt-injection scanner, credential scanner, URL block, unicode-evasion scanner, namespace allowlist, author attribution, audit log, rate limit, body-hash tamper detection, and a review queue for `rule`-type skills. See [Security model](#security-model) above.
+
+### Does it work in production?
+
+Yes — yantrikdb-mcp runs in production on the YantrikDB homelab cluster (1973+ memories, SSE transport, 2 weeks uptime per release cycle) and is the reference deployment behind the engine's release decisions. v0.8.x added the engine's same-day-patch cadence to the MCP server itself: external issues filed by community contributors land as released fixes within 2 hours.
+
+### What's the engine written in?
+
+The YantrikDB engine is Rust ([crates.io: yantrikdb](https://crates.io/crates/yantrikdb)) with pyo3 Python bindings ([PyPI: yantrikdb](https://pypi.org/project/yantrikdb/)). The MCP server itself is Python — a thin wrapper around the engine's Python bindings, plus stdio/SSE/HTTP transport plumbing.
+
+## Comparison with other agent memory systems
+
+| Capability | YantrikDB MCP | mem0 | Letta (MemGPT) | Zep | Native MCP filesystem memory |
+|---|---|---|---|---|---|
+| MCP-native | ✅ first-class | via custom integration | via custom integration | via custom integration | ✅ filesystem-shaped |
+| Embeddable (no server) | ✅ Rust + Python | ❌ requires service | ❌ requires service | ❌ requires service | ✅ filesystem |
+| Network database mode | ✅ Raft HA cluster | ✅ Pro / Enterprise | ✅ self-host | ✅ managed + self-host | ❌ |
+| Semantic recall (vector) | ✅ HNSW | ✅ | ✅ | ✅ | ❌ (file grep only) |
+| Knowledge graph | ✅ typed nodes + edges | ✅ (recent addition) | partial | ✅ | ❌ |
+| Contradiction detection | ✅ autonomous | ❌ | ❌ | ❌ | ❌ |
+| Procedural memory | ✅ effectiveness-ranked | ❌ | partial | ❌ | ❌ |
+| Skill substrate (schema-validated) | ✅ with 7 defense layers | ❌ | ❌ | ❌ | ❌ |
+| Autonomous consolidation (`think`) | ✅ | ❌ | partial | ✅ | ❌ |
+| Temporal decay + half-life | ✅ biological model | ❌ | ❌ | ❌ | ❌ |
+| Proactive triggers | ✅ | ❌ | ❌ | ❌ | ❌ |
+| Personality traits derivation | ✅ from memory patterns | ❌ | ❌ | ❌ | ❌ |
+| Storage | local SQLite + WAL | hosted | local | local + hosted | filesystem |
+| License | MIT (engine AGPL-3.0) | Apache 2.0 | Apache 2.0 | Apache 2.0 | MIT |
+| Peer-reviewed paper | ✅ [Zenodo](https://doi.org/10.5281/zenodo.20128887) | ❌ | ✅ MemGPT paper | ❌ | ❌ |
+| Same-day patch cadence for issues | ✅ (avg <2h on v0.8.x) | varies | varies | varies | n/a |
+
+Comparisons reflect public-facing capabilities as of May 2026. PRs welcome to correct any rows.
+
+## Cite this work
+
+If you use YantrikDB in academic or research context, please cite the substrate paper:
+
+```bibtex
+@misc{sarkar2026skill,
+  author       = {Sarkar, Pranab},
+  title        = {Skill as Memory, Not Document: A Database-Native Substrate for Agent Skill Catalogs},
+  year         = {2026},
+  publisher    = {Zenodo},
+  doi          = {10.5281/zenodo.20128887},
+  url          = {https://doi.org/10.5281/zenodo.20128887},
+  orcid        = {0009-0009-8683-1481}
+}
+```
+
+Plain text citation:
+
+> Sarkar, P. (2026). *Skill as Memory, Not Document: A Database-Native Substrate for Agent Skill Catalogs*. Zenodo. https://doi.org/10.5281/zenodo.20128887
 
 ## Examples
 
