@@ -112,6 +112,16 @@ if _multilingual_supported() and os.environ.get("YANTRIKDB_TEST_MULTILINGUAL") =
 
 @pytest.mark.parametrize("backend", BACKENDS)
 def test_mcp_stdio_record_recall_roundtrip(tmp_path: Path, backend: str):
+    # Engine v0.9.0 broke `set_embedder_named` for the multilingual swap
+    # path — workers spawned in the pyo3 constructor hold ConnectionProxy
+    # refs that block the exclusive-access guard. Tracked in
+    # yantrikos/yantrikdb#58; bundled + onnx are unaffected.
+    if backend == "multilingual":
+        pytest.xfail(
+            "engine v0.9.0 regression: set_embedder_named cannot acquire "
+            "exclusive access after pyo3 constructors spawn workers — "
+            "see yantrikos/yantrikdb#58. Re-enable once engine ships the fix."
+        )
     """Spawn the real entrypoint, do a record → recall round-trip via JSON-RPC."""
     db_path = tmp_path / f"e2e_{backend}.db"
 
