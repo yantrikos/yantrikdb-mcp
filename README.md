@@ -16,7 +16,7 @@ Works with Claude Code, Cursor, Windsurf, and any MCP-compatible client.
 | **Works with** | Claude Code, Cursor, Windsurf, Continue, Claude Desktop, any MCP client |
 | **Storage** | Local SQLite at `~/.yantrikdb/memory.db` (or any path; or HTTP cluster) |
 | **Embedder** | Bundled 64-dim Rust embedder (default), 384-dim ONNX MiniLM (`[onnx]` extra), 256-dim multilingual (101 languages) |
-| **Tools** | 16 — remember, recall, forget, correct, think, memory, graph, conflict, trigger, session, temporal, procedure, category, personality, stats, skill |
+| **Tools** | 19 — remember, recall, forget, correct, think, memory, graph, conflict, trigger, session, temporal, procedure, category, personality, stats, skill, gaps, conversation, task |
 | **License** | MIT (engine: AGPL-3.0) |
 | **Privacy** | All data on your machine. No telemetry. No external services. |
 
@@ -169,7 +169,7 @@ Run the benchmark yourself: `python benchmarks/bench_token_savings.py`
 
 ## Tools
 
-16 tools, full engine coverage:
+19 tools, full engine coverage (added `gaps`, `conversation`, `task` in v0.9.0):
 
 | Tool | Actions | Purpose |
 |---|---|---|
@@ -189,6 +189,21 @@ Run the benchmark yourself: `python benchmarks/bench_token_savings.py`
 | `personality` | get / set | AI personality traits from memory patterns |
 | `stats` | stats / health / weights / maintenance | Engine stats, health, weights, and index rebuilds |
 | `skill` | define / surface / outcome / get / list | Substrate-native agent skill catalog (writes off by default — see [Skill substrate](#skill-substrate-v070)) |
+| `gaps` | — | **v0.9.0** — surface frequently-asked, poorly-answered queries (substrate's known unknowns) |
+| `conversation` | record / recent / clear | **v0.9.0** — bounded encrypted ring buffer for verbatim conversation turns, namespace-isolated |
+| `task` | add / get / list / update / delete | **v0.9.0** — substrate-backed task / chore store; survives sessions, surfaces in `session(action="digest")` |
+
+Plus new actions on existing tools in v0.9.0:
+- `session(action="digest")` — one-call boot-time briefing (narrative chain head + open decisions + conflicts + triggers)
+- `think(maintenance_cycle=True)` — autonomous hygiene sleep cycle
+- `think(last_cycle_only=True)` — read the last cycle summary without running
+- `stats(action="audit_leak")` — privacy / leak-candidate audit
+- `stats(action="skill_outcomes")` — durable skill-outcome count
+- `graph(action="auto_relate" / "record_link" / "record_unlink" / "linked_records" / "recall_with_links")` — co-occurrence edges + record-to-record links + link-expanded recall
+- `conflict(action="auto_resolve")` — burn down unambiguous conflicts in one pass
+- `memory(action="chain_head" / "history")` — chain-namespace head + revision history
+- `trigger(action="prune")` — bound the pending-trigger backlog
+- `remember(summary=...)` — draft mode: engine atomizes a long summary into linked semantic facts (end-of-session auto-capture)
 
 See [yantrikdb.com/guides/mcp](https://yantrikdb.com/guides/mcp/) for full documentation.
 

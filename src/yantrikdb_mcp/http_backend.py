@@ -471,6 +471,117 @@ class HttpBackend:
                                   hint="Trigger-upcoming listing isn't "
                                        "exposed over HTTP yet.")
 
+    # ── v0.8.0 / v0.9.0 engine surface — stubs until /v1/* lands ────
+    # The engine v0.8.0/v0.9.0 added 25 new methods (tiering, demand,
+    # conversation, tasks, hygiene primitives, link primitives,
+    # session_digest, audit_leak, skill_outcome_count, draft_from_summary,
+    # record_batch). The HTTP server's /v1/* surface lags; tools.py
+    # invokes these via the embedded path. Cluster-mode callers get a
+    # clear RemoteUnsupportedError instead of AttributeError, with a
+    # pointer to the embedded fallback or the relevant tracking issue.
+
+    def session_digest(self, *args, **kw) -> dict:
+        raise self._not_supported(
+            "session_digest",
+            hint="v0.9.0 boot briefing isn't exposed over HTTP yet; embedded "
+                 "mode has db.session_digest() now.",
+        )
+
+    def knowledge_gaps(self, *args, **kw) -> list:
+        raise self._not_supported(
+            "knowledge_gaps",
+            hint="v0.9.0 demand log isn't exposed over HTTP yet.",
+        )
+
+    def record_turn(self, *args, **kw):
+        raise self._not_supported("record_turn",
+                                  hint="v0.9.0 conversation ring buffer is embedded-only today.")
+
+    def recent_turns(self, *args, **kw) -> list:
+        raise self._not_supported("recent_turns",
+                                  hint="v0.9.0 conversation ring buffer is embedded-only today.")
+
+    def clear_turns(self, *args, **kw) -> int:
+        raise self._not_supported("clear_turns",
+                                  hint="v0.9.0 conversation ring buffer is embedded-only today.")
+
+    def task_add(self, *args, **kw) -> str:
+        raise self._not_supported("task_add",
+                                  hint="v0.9.0 task store is embedded-only today.")
+
+    def task_get(self, *args, **kw):
+        raise self._not_supported("task_get",
+                                  hint="v0.9.0 task store is embedded-only today.")
+
+    def task_list(self, *args, **kw) -> list:
+        raise self._not_supported("task_list",
+                                  hint="v0.9.0 task store is embedded-only today.")
+
+    def task_update(self, *args, **kw) -> bool:
+        raise self._not_supported("task_update",
+                                  hint="v0.9.0 task store is embedded-only today.")
+
+    def task_delete(self, *args, **kw) -> bool:
+        raise self._not_supported("task_delete",
+                                  hint="v0.9.0 task store is embedded-only today.")
+
+    def run_maintenance_cycle(self, *args, **kw) -> dict:
+        raise self._not_supported(
+            "run_maintenance_cycle",
+            hint="v0.9.0 autonomous hygiene cycle is embedded-only today.",
+        )
+
+    def last_maintenance_cycle(self, *args, **kw):
+        raise self._not_supported("last_maintenance_cycle")
+
+    def audit_leak_candidates(self, *args, **kw) -> dict:
+        raise self._not_supported("audit_leak_candidates")
+
+    def auto_relate(self, *args, **kw) -> dict:
+        raise self._not_supported("auto_relate")
+
+    def auto_resolve_conflicts(self, *args, **kw) -> dict:
+        raise self._not_supported("auto_resolve_conflicts")
+
+    def chain_head(self, *args, **kw):
+        raise self._not_supported("chain_head")
+
+    def history(self, *args, **kw) -> list:
+        raise self._not_supported("history")
+
+    def linked_records(self, *args, **kw) -> list:
+        raise self._not_supported("linked_records")
+
+    def recall_with_links(self, *args, **kw) -> dict:
+        raise self._not_supported("recall_with_links")
+
+    def link(self, *args, **kw) -> str:
+        raise self._not_supported("link",
+                                  hint="Record-to-record link primitive is embedded-only today.")
+
+    def unlink(self, *args, **kw) -> bool:
+        raise self._not_supported("unlink",
+                                  hint="Record-to-record link primitive is embedded-only today.")
+
+    def prune_triggers(self, *args, **kw) -> dict:
+        raise self._not_supported("prune_triggers")
+
+    def skill_outcome_count(self, *args, **kw) -> int:
+        raise self._not_supported("skill_outcome_count")
+
+    def record_batch(self, *args, **kw) -> list:
+        raise self._not_supported(
+            "record_batch",
+            hint="HTTP backend doesn't have /v1/memories/batch yet; "
+                 "tools.py falls back to a per-item loop transparently.",
+        )
+
+    def draft_memories_from_summary(self, *args, **kw) -> dict:
+        raise self._not_supported(
+            "draft_memories_from_summary",
+            hint="End-of-session auto-capture is embedded-only today.",
+        )
+
     def close(self):
         self._session.close()
 
