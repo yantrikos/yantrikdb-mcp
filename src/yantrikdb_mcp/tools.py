@@ -41,6 +41,7 @@ def remember(
     certainty: float = 0.8,
     emotional_state: str | None = None,
     memories: list[dict] | None = None,
+    summary: str | None = None,
     ctx: Context = None,
 ) -> str:
     """Store one or more memories in persistent cognitive memory.
@@ -49,8 +50,11 @@ def remember(
     worth remembering — decisions, preferences, facts about people, project context.
     Do NOT store ephemeral task details, code snippets, or git-derivable info.
 
-    SINGLE: remember(text="User prefers dark mode", domain="preference", importance=0.7)
-    BATCH:  remember(memories=[{"text": "Alice is DevOps lead", "domain": "people"}, {"text": "Deadline March 30", "domain": "work", "importance": 0.9}])
+    SINGLE:  remember(text="User prefers dark mode", domain="preference", importance=0.7)
+    BATCH:   remember(memories=[{"text": "Alice is DevOps lead", "domain": "people"}, ...])
+    DRAFT:   remember(summary="...long end-of-session summary...") — v0.8.0+ engine
+             atomizes the summary into linked semantic facts; useful for the
+             end-of-session auto-capture pattern.
 
     IMPORTANCE: 0.8-1.0 critical decisions | 0.5-0.7 useful context | 0.3-0.5 background
 
@@ -65,14 +69,22 @@ def remember(
         namespace: For per-project isolation.
         certainty: Confidence 0.0-1.0.
         emotional_state: joy, frustration, excitement, concern, neutral.
-        memories: List of memory dicts for batch. Each needs "text", optional: memory_type, importance, domain, source, valence, metadata, namespace, certainty, emotional_state.
+        memories: List of memory dicts for batch.
+        summary: For draft mode — long summary that the engine atomizes.
     """
     db = _get_db(ctx)
 
-    # Batch mode
+    # Draft mode (v0.8.0+) — engine atomizes a summary into linked facts
+    if summary is not None:
+        if not summary.strip():
+            raise ToolError("summary must be non-empty when provided")
+        result = db.draft_memories_from_summary(summary.strip(), namespace=namespace, domain=domain)
+        return json.dumps(result if isinstance(result, dict) else {"drafted": result})
+
+    # Batch mode — uses record_batch() (v0.9.0) under the hood for one-shot insert
     if memories:
-        # Validate all items before committing any
         valid_types = ("semantic", "episodic", "procedural")
+        inputs = []
         for i, mem in enumerate(memories):
             t = (mem.get("text") or "").strip()
             if not t:
@@ -80,19 +92,43 @@ def remember(
             mt = mem.get("memory_type", "semantic")
             if mt not in valid_types:
                 raise ToolError(f"memories[{i}].memory_type must be one of {valid_types}, got '{mt}'")
+            inputs.append({
+                "text": t,
+                "memory_type": mt,
+                "importance": max(0.0, min(1.0, mem.get("importance", 0.5))),
+                "valence": max(-1.0, min(1.0, mem.get("valence", 0.0))),
+                "metadata": mem.get("metadata", {}),
+                "namespace": mem.get("namespace", namespace),
+                "certainty": max(0.0, min(1.0, mem.get("certainty", 0.8))),
+                "domain": mem.get("domain", "general"),
+                "source": mem.get("source", "user"),
+                "emotional_state": mem.get("emotional_state"),
+            })
+
+        # Prefer record_batch (v0.9.0+) for atomic batch insert; fall back to
+        # loop on older engines OR HTTP backend that may not expose it.
+        if hasattr(db, "record_batch"):
+            try:
+                results = db.record_batch(inputs)
+                if isinstance(results, list):
+                    return json.dumps({"rids": results, "count": len(results), "status": "recorded"})
+            except Exception:
+                # fall through to loop
+                pass
+
         results = []
-        for mem in memories:
+        for mem in inputs:
             rid = db.record(
-                mem["text"].strip(),
-                memory_type=mem.get("memory_type", "semantic"),
-                importance=max(0.0, min(1.0, mem.get("importance", 0.5))),
-                valence=max(-1.0, min(1.0, mem.get("valence", 0.0))),
-                metadata=mem.get("metadata", {}),
-                namespace=mem.get("namespace", namespace),
-                certainty=max(0.0, min(1.0, mem.get("certainty", 0.8))),
-                domain=mem.get("domain", "general"),
-                source=mem.get("source", "user"),
-                emotional_state=mem.get("emotional_state"),
+                mem["text"],
+                memory_type=mem["memory_type"],
+                importance=mem["importance"],
+                valence=mem["valence"],
+                metadata=mem["metadata"],
+                namespace=mem["namespace"],
+                certainty=mem["certainty"],
+                domain=mem["domain"],
+                source=mem["source"],
+                emotional_state=mem["emotional_state"],
             )
             results.append(rid)
         return json.dumps({"rids": results, "count": len(results), "status": "recorded"})
@@ -317,6 +353,19 @@ def think(
     run_pattern_mining: bool = False,
     consolidation_time_window_days: float = 7.0,
     consolidation_limit: int = 5,
+    maintenance_cycle: bool = False,
+    last_cycle_only: bool = False,
+    dry_run: bool = True,
+    burn_down_conflicts: bool = True,
+    prune_triggers_too: bool = True,
+    max_pending_triggers: int = 64,
+    recalibrate_importance: bool = True,
+    backfill_entities: bool = True,
+    auto_relate_in_cycle: bool = True,
+    max_auto_relate_edges: int = 500,
+    split_oversized: bool = False,
+    split_min_chars: int = 1500,
+    repair_artifacts: bool = False,
     ctx: Context = None,
 ) -> str:
     """Run incremental cognitive maintenance — processes a small batch per call.
@@ -325,10 +374,14 @@ def think(
     Running regularly (e.g. at end of conversation) gradually maintains the
     entire database without blocking. Safe to call frequently.
 
-    WHEN TO USE:
-    - End of conversations with new memories stored.
-    - When you suspect contradictions exist.
-    - Periodically to keep memory healthy.
+    MODES:
+    - Default: incremental think() — consolidation + conflict scan + (optional)
+      pattern mining on a small batch.
+    - maintenance_cycle=True: run the v0.9.0 autonomous-hygiene "sleep cycle" —
+      think + burn-down-conflicts + prune-triggers + recalibrate-importance +
+      backfill-entities + auto-relate (+ optional split_oversized + repair_artifacts).
+    - last_cycle_only=True: just fetch the last persisted maintenance-cycle
+      summary (read-only, no work performed).
 
     Args:
         run_consolidation: Merge similar memories (default on).
@@ -337,12 +390,40 @@ def think(
         consolidation_time_window_days: Only consolidate memories within this
             window (default 7 days).
         consolidation_limit: Batch size — max memories to process per call
-            (default 5). Keep small for fast returns. Run think() multiple
-            times to process more.
-
-    Returns consolidation count, conflicts found, patterns, and triggers.
+            (default 5). Keep small for fast returns.
+        maintenance_cycle: Run the full autonomous hygiene cycle instead.
+        last_cycle_only: Just fetch the last cycle summary (read-only).
+        dry_run: For maintenance_cycle — preview without persisting changes.
+        burn_down_conflicts / prune_triggers_too / max_pending_triggers /
+        recalibrate_importance / backfill_entities / auto_relate_in_cycle /
+        max_auto_relate_edges / split_oversized / split_min_chars /
+        repair_artifacts: Maintenance-cycle knobs.
     """
     db = _get_db(ctx)
+
+    # last_cycle_only — read-only short-circuit
+    if last_cycle_only:
+        last = db.last_maintenance_cycle()
+        return json.dumps({"last_maintenance_cycle": last})
+
+    # Full v0.9.0 maintenance cycle
+    if maintenance_cycle:
+        result = db.run_maintenance_cycle(
+            run_think=run_consolidation,
+            burn_down_conflicts=burn_down_conflicts,
+            prune_triggers=prune_triggers_too,
+            max_pending_triggers=max_pending_triggers,
+            recalibrate_importance=recalibrate_importance,
+            backfill_entities=backfill_entities,
+            auto_relate=auto_relate_in_cycle,
+            max_auto_relate_edges=max_auto_relate_edges,
+            split_oversized=split_oversized,
+            split_min_chars=split_min_chars,
+            repair_artifacts=repair_artifacts,
+        )
+        return json.dumps({"maintenance_cycle": result if isinstance(result, dict) else {"result": result}})
+
+    # Default incremental think()
     config = {
         "run_consolidation": run_consolidation,
         "run_conflict_scan": run_conflict_scan,
@@ -388,29 +469,28 @@ def memory(
     text_contains: str | None = None,
     ctx: Context = None,
 ) -> str:
-    """Manage individual memories — get, list, search, update importance, archive, or hydrate.
+    """Manage individual memories — get, list, search, update importance, archive,
+    hydrate, fetch a chain-shaped namespace's head (v0.8.0), or query revision
+    history (v0.8.0+).
 
     ACTIONS:
-    - "get": Retrieve a single memory by rid.
-    - "list": Browse memories with filters (domain, type, namespace, sort).
-    - "search": Keyword search — exact substring match (case-insensitive). Use instead of recall when you need exact keyword lookups like "Postgres version".
+    - "get":               Retrieve a single memory by rid.
+    - "list":              Browse memories with filters.
+    - "search":            Keyword substring search.
     - "update_importance": Change a memory's importance score.
-    - "archive": Move memory to cold storage (excluded from recall).
-    - "hydrate": Restore archived memory to active.
+    - "archive":           Move to cold storage.
+    - "hydrate":           Restore archived memory.
+    - "chain_head":        v0.8.0 — head (most recent entry) of a chain-shaped
+                           namespace. Useful for narrative / decision chains.
+    - "history":           v0.8.0 — revision history for a single rid (needs rid).
 
     Args:
-        action: One of "get", "list", "search", "update_importance", "archive", "hydrate".
-        rid: Memory ID (required for get/update_importance/archive/hydrate).
-        importance: New importance 0.0-1.0 (for update_importance).
-        limit: Max results for list/search (default 50, max 200).
-        offset: Pagination offset for list.
-        domain: Filter for list/search.
-        memory_type: Filter for list/search: "semantic", "episodic", "procedural".
-        namespace: Filter for list/search.
-        sort_by: For list: "created_at", "importance", "last_access".
-        text_contains: For search: case-insensitive substring to match.
+        See action docs above. New args:
+        namespace: Required for chain_head — the chain-shaped namespace.
+        rid: Required for history — record to fetch revisions for.
     """
-    valid = ("get", "list", "search", "update_importance", "archive", "hydrate")
+    valid = ("get", "list", "search", "update_importance", "archive", "hydrate",
+             "chain_head", "history")
     if action not in valid:
         raise ToolError(f"action must be one of {valid}")
 
@@ -500,6 +580,20 @@ def memory(
             return _err(f"Memory '{rid}' not found or already hot")
         return json.dumps({"hydrated": rid, "status": "hot"})
 
+    if action == "chain_head":
+        if not namespace:
+            raise ToolError("namespace required for chain_head")
+        head = db.chain_head(namespace)
+        if head is None:
+            return _err(f"no chain head in namespace {namespace!r}", namespace=namespace)
+        return json.dumps(head if isinstance(head, dict) else {"head": head})
+
+    if action == "history":
+        if not rid:
+            raise ToolError("rid required for history")
+        revs = db.history(rid)
+        return json.dumps({"rid": rid, "count": len(revs or []), "revisions": revs or []})
+
 
 # ── 7. graph ──
 
@@ -516,39 +610,52 @@ def graph(
     limit: int = 20,
     days: float = 90.0,
     namespace: str | None = None,
+    # v0.9.0: record-to-record link primitives + auto_relate
+    source_rid: str | None = None,
+    target_rid: str | None = None,
+    link_type: str = "related_to",
+    direction: str = "both",
+    dry_run: bool = True,
+    max_edges: int = 500,
+    query: str | None = None,
+    top_k: int = 10,
+    expand_links: int = 1,
     ctx: Context = None,
 ) -> str:
-    """Knowledge graph operations — create relationships, query entities, link memories.
+    """Knowledge graph operations — entity relationships, memory↔entity links,
+    record-to-record links, co-occurrence auto-relate, and link-expanded recall.
 
     ACTIONS:
-    - "relate": Create relationship. Needs entity (source), target, relationship.
-    - "edges": Get all relationships for entity.
-    - "link": Link a memory (rid) to an entity.
-    - "search": Find entities by pattern (substring match).
-    - "profile": Rich entity profile with temporal/emotional dimensions.
-    - "depth": Measure how deeply the system knows an entity (0.0-1.0 score).
-
-    EXAMPLES:
-    - graph(action="relate", entity="Alice", target="Backend Team", relationship="manages")
-    - graph(action="edges", entity="Alice")
-    - graph(action="link", rid="abc123", entity="Alice")
-    - graph(action="search", pattern="Ali")
-    - graph(action="profile", entity="Alice")
-    - graph(action="depth", entity="Alice")
+    - "relate":           Entity↔entity relationship (legacy).
+    - "edges":            Get all relationships for entity.
+    - "link":             Link a memory (rid) to an entity (legacy).
+    - "search":           Find entities by pattern.
+    - "profile":          Rich entity profile.
+    - "depth":            How deeply the system knows an entity.
+    - "auto_relate":      v0.8.0 — co-occurrence-driven edge backfill.
+                          Set dry_run=False to persist.
+    - "record_link":      v0.9.0 — add a record-to-record link
+                          (needs source_rid + target_rid + link_type).
+    - "record_unlink":    v0.9.0 — remove a record-to-record link.
+    - "linked_records":   v0.9.0 — traverse links from rid (direction =
+                          "outbound" | "inbound" | "both", optional link_type filter).
+    - "recall_with_links": v0.9.0 — semantic recall with N-hop link expansion.
 
     Args:
-        action: "relate", "edges", "link", "search", "profile", "depth".
-        entity: Entity name (required for all except link when pattern is used).
-        target: Target entity (for relate).
-        relationship: Relationship type (for relate). Default "related_to".
-        weight: Relationship strength 0.0-1.0 (for relate).
-        rid: Memory ID (for link).
-        pattern: Search pattern (for search).
-        limit: Max results (for search).
-        days: Time window (for profile).
-        namespace: Namespace filter (for profile/depth).
+        action: One of the actions above.
+        entity / target / relationship / weight / rid / pattern / limit /
+        days / namespace: Legacy entity-graph args.
+        source_rid / target_rid / link_type: For record_link / record_unlink.
+        direction: For linked_records — "outbound" / "inbound" / "both".
+        dry_run: For auto_relate — preview without persisting.
+        max_edges: For auto_relate — cap edges proposed/created.
+        query: For recall_with_links — natural language search.
+        top_k: For recall_with_links — max seed results.
+        expand_links: For recall_with_links — hop budget for traversal.
     """
-    valid = ("relate", "edges", "link", "search", "profile", "depth")
+    valid = ("relate", "edges", "link", "search", "profile", "depth",
+             "auto_relate", "record_link", "record_unlink",
+             "linked_records", "recall_with_links")
     if action not in valid:
         raise ToolError(f"action must be one of {valid}")
 
@@ -597,6 +704,42 @@ def graph(
         depth = db.relationship_depth(entity, namespace)
         return json.dumps(depth)
 
+    if action == "auto_relate":
+        result = db.auto_relate(dry_run=dry_run, max_edges=max_edges)
+        return json.dumps(result if isinstance(result, dict) else {"result": result})
+
+    if action == "record_link":
+        if not source_rid or not target_rid:
+            raise ToolError("source_rid and target_rid required for record_link")
+        link_id = db.link(source_rid, target_rid, link_type)
+        return json.dumps({
+            "link_id": link_id, "source_rid": source_rid,
+            "target_rid": target_rid, "link_type": link_type,
+        })
+
+    if action == "record_unlink":
+        if not source_rid or not target_rid:
+            raise ToolError("source_rid and target_rid required for record_unlink")
+        removed = db.unlink(source_rid, target_rid, link_type)
+        return json.dumps({"removed": removed})
+
+    if action == "linked_records":
+        if not rid:
+            raise ToolError("rid required for linked_records")
+        if direction not in ("outbound", "inbound", "both"):
+            raise ToolError("direction must be 'outbound', 'inbound', or 'both'")
+        rows = db.linked_records(rid, direction=direction, link_type=(link_type if link_type != "related_to" else None))
+        return json.dumps({"rid": rid, "direction": direction, "count": len(rows or []), "linked": rows or []})
+
+    if action == "recall_with_links":
+        if not query:
+            raise ToolError("query required for recall_with_links")
+        result = db.recall_with_links(
+            query=query, top_k=top_k, expand_links=expand_links,
+            namespace=namespace,
+        )
+        return json.dumps(result if isinstance(result, dict) else {"results": result})
+
 
 # ── 8. conflict ──
 
@@ -612,39 +755,35 @@ def conflict(
     resolution_note: str | None = None,
     new_type: str | None = None,
     limit: int = 10,
+    dry_run: bool = True,
     ctx: Context = None,
 ) -> str:
-    """Manage memory conflicts (contradictions) — list, resolve, dismiss, or reclassify.
+    """Manage memory conflicts (contradictions) — list, resolve, dismiss,
+    reclassify, or batch-burn-down the unambiguous ones (v0.8.0+).
 
     ACTIONS:
-    - "list": List conflicts. Optional status filter ("open", "resolved", "dismissed").
-    - "get": Get single conflict by conflict_id.
-    - "resolve": Resolve with strategy: "keep_a", "keep_b", "keep_both", "merge", "dismiss".
-    - "reclassify": Reclassify conflict type and teach substitution patterns.
-
-    EXAMPLES:
-    - conflict() → list open conflicts
-    - conflict(action="get", conflict_id="abc")
-    - conflict(action="resolve", conflict_id="abc", strategy="keep_a")
-    - conflict(action="resolve", conflict_id="abc", strategy="dismiss", resolution_note="false positive")
-    - conflict(action="reclassify", conflict_id="abc", new_type="preference")
+    - "list":        List conflicts. Optional status filter.
+    - "get":         Get single conflict by conflict_id.
+    - "resolve":     Resolve with strategy: "keep_a"/"keep_b"/"keep_both"/"merge"/"dismiss".
+    - "reclassify":  Reclassify conflict type.
+    - "auto_resolve": v0.8.0 — burn down unambiguous conflicts in one pass.
+                     Set dry_run=False to actually persist.
 
     Args:
-        action: "list", "get", "resolve", "reclassify".
-        conflict_id: Required for get/resolve/reclassify.
-        status: Filter for list: "open", "resolved", "dismissed".
-        strategy: For resolve: "keep_a", "keep_b", "keep_both", "merge", "dismiss".
-        winner_rid: For keep_a/keep_b (optional, inferred).
-        new_text: For "merge" strategy.
-        resolution_note: Why this resolution was chosen.
-        new_type: For reclassify: "identity_fact", "preference", "temporal".
-        limit: Max results for list.
+        action: "list", "get", "resolve", "reclassify", "auto_resolve".
+        conflict_id / status / strategy / winner_rid / new_text / resolution_note /
+        new_type / limit: see action docs above.
+        dry_run: For auto_resolve — preview without persisting.
     """
-    valid = ("list", "get", "resolve", "reclassify")
+    valid = ("list", "get", "resolve", "reclassify", "auto_resolve")
     if action not in valid:
         raise ToolError(f"action must be one of {valid}")
 
     db = _get_db(ctx)
+
+    if action == "auto_resolve":
+        result = db.auto_resolve_conflicts(dry_run=dry_run)
+        return json.dumps(result if isinstance(result, dict) else {"result": result})
 
     if action == "list":
         conflict_list = db.get_conflicts(status=status, limit=limit)
@@ -657,6 +796,7 @@ def conflict(
         ]
         return json.dumps({"count": len(items), "conflicts": items})
 
+    # auto_resolve already handled above; remaining actions require conflict_id
     if not conflict_id:
         raise ToolError("conflict_id required")
 
@@ -703,29 +843,39 @@ def trigger(
     trigger_id: str | None = None,
     trigger_type: str | None = None,
     limit: int = 10,
+    dry_run: bool = True,
+    max_pending: int = 64,
     ctx: Context = None,
 ) -> str:
-    """Manage proactive triggers — insights, warnings, and suggestions from the memory system.
+    """Manage proactive triggers + v0.8.0 bounded-backlog pruning.
 
     ACTIONS:
-    - "pending": Get pending triggers (default).
-    - "history": View past triggers.
+    - "pending":     Get pending triggers (default).
+    - "history":     View past triggers.
     - "acknowledge": Mark trigger as seen.
-    - "deliver": Mark as shown to user.
-    - "act": Mark as acted upon.
-    - "dismiss": Dismiss as irrelevant.
+    - "deliver":     Mark as shown to user.
+    - "act":         Mark as acted upon.
+    - "dismiss":     Dismiss as irrelevant.
+    - "prune":       v0.8.0 — expire overdue triggers + evict oldest when over
+                     `max_pending`. Set dry_run=False to actually persist.
 
     Args:
-        action: "pending", "history", "acknowledge", "deliver", "act", "dismiss".
+        action: One of the actions above.
         trigger_id: Required for acknowledge/deliver/act/dismiss.
         trigger_type: Filter by type (for pending/history).
         limit: Max results.
+        dry_run: For prune — preview without persisting.
+        max_pending: For prune — soft cap on the pending backlog (default 64).
     """
-    valid = ("pending", "history", "acknowledge", "deliver", "act", "dismiss")
+    valid = ("pending", "history", "acknowledge", "deliver", "act", "dismiss", "prune")
     if action not in valid:
         raise ToolError(f"action must be one of {valid}")
 
     db = _get_db(ctx)
+
+    if action == "prune":
+        result = db.prune_triggers(dry_run=dry_run, max_pending=max_pending)
+        return json.dumps(result if isinstance(result, dict) else {"result": result})
 
     if action == "pending":
         trigger_list = db.get_pending_triggers(limit=limit)
@@ -772,19 +922,28 @@ def session(
     summary: str | None = None,
     limit: int = 10,
     abandon_stale_hours: float | None = None,
+    narrative_namespace: str | None = None,
+    max_decisions: int = 8,
+    max_conflicts: int = 5,
+    max_triggers: int = 5,
+    snippet_chars: int = 240,
     ctx: Context = None,
 ) -> str:
-    """Session lifecycle — start, end, history, active check, and stale cleanup.
+    """Session lifecycle — start, end, history, active check, stale cleanup,
+    and the v0.9.0 boot-time digest.
 
     ACTIONS:
-    - "start": Begin a new session. Returns session_id.
-    - "end": End a session (needs session_id). Returns stats.
+    - "start":   Begin a new session. Returns session_id.
+    - "end":     End a session (needs session_id). Returns stats.
     - "history": View past sessions.
-    - "active": Check if there's a running session.
+    - "active":  Check if there's a running session.
     - "abandon_stale": Clean up orphaned sessions older than abandon_stale_hours.
+    - "digest":  One-call boot-time briefing (v0.9.0) — narrative chain head,
+                 open decisions/conflicts/triggers, top stale memories.
+                 Call this at conversation start instead of N separate recalls.
 
     Args:
-        action: "start", "end", "history", "active", "abandon_stale".
+        action: "start", "end", "history", "active", "abandon_stale", "digest".
         session_id: For end.
         namespace: Memory namespace.
         client_id: Client identifier.
@@ -792,8 +951,11 @@ def session(
         summary: For end — what happened.
         limit: For history.
         abandon_stale_hours: For abandon_stale — max age in hours.
+        narrative_namespace: For digest — namespace for the narrative chain.
+        max_decisions / max_conflicts / max_triggers: For digest — surface caps.
+        snippet_chars: For digest — text-snippet length per item.
     """
-    valid = ("start", "end", "history", "active", "abandon_stale")
+    valid = ("start", "end", "history", "active", "abandon_stale", "digest")
     if action not in valid:
         raise ToolError(f"action must be one of {valid}")
 
@@ -821,6 +983,16 @@ def session(
         hours = abandon_stale_hours or 24.0
         count = db.session_abandon_stale(max_age_hours=hours)
         return json.dumps({"abandoned_sessions": count, "max_age_hours": hours})
+
+    if action == "digest":
+        digest = db.session_digest(
+            narrative_namespace=narrative_namespace,
+            max_decisions=max_decisions,
+            max_conflicts=max_conflicts,
+            max_triggers=max_triggers,
+            snippet_chars=snippet_chars,
+        )
+        return json.dumps(digest if isinstance(digest, dict) else {"digest": digest})
 
 
 # ── 11. temporal ──
@@ -1050,27 +1222,33 @@ def stats(
     action: str = "stats",
     namespace: str | None = None,
     maintenance_op: str | None = None,
+    max_rids: int = 100,
     ctx: Context = None,
 ) -> str:
-    """Engine statistics, health check, learned weights, and maintenance operations.
+    """Engine statistics, health check, learned weights, maintenance ops,
+    privacy/leak audit, and skill substrate counts.
 
     ACTIONS:
-    - "stats": Detailed memory statistics (default).
-    - "health": Quick health check with latency.
-    - "weights": Show adapted recall scoring weights.
+    - "stats":       Detailed memory statistics (default).
+    - "health":      Quick health check with latency.
+    - "weights":     Show adapted recall scoring weights.
     - "maintenance": Run maintenance (needs maintenance_op).
+    - "audit_leak":  v0.8.0 windowed leak-candidate audit — surfaces recent
+                     records that may have leaked sensitive content. Use for
+                     privacy review.
+    - "skill_outcomes": v0.9.0 — total skill outcomes recorded in the durable
+                        timeline.
 
     MAINTENANCE OPS:
-    - "backfill_entities": Create missing memory↔entity links.
-    - "rebuild_vec_index": Rebuild vector similarity index.
-    - "rebuild_graph_index": Rebuild knowledge graph index.
+    - "backfill_entities", "rebuild_vec_index", "rebuild_graph_index".
 
     Args:
-        action: "stats", "health", "weights", "maintenance".
+        action: One of the actions above.
         namespace: Filter for stats.
-        maintenance_op: For maintenance: "backfill_entities", "rebuild_vec_index", "rebuild_graph_index".
+        maintenance_op: For maintenance.
+        max_rids: For audit_leak — max candidate rids to inspect.
     """
-    valid = ("stats", "health", "weights", "maintenance")
+    valid = ("stats", "health", "weights", "maintenance", "audit_leak", "skill_outcomes")
     if action not in valid:
         raise ToolError(f"action must be one of {valid}")
 
@@ -1119,6 +1297,13 @@ def stats(
             result = "ok"
         elapsed_ms = round((time.time() - t0) * 1000, 1)
         return json.dumps({"action": maintenance_op, "result": result, "elapsed_ms": elapsed_ms})
+
+    if action == "audit_leak":
+        report = db.audit_leak_candidates(max_rids=max_rids)
+        return json.dumps(report if isinstance(report, dict) else {"audit": report})
+
+    if action == "skill_outcomes":
+        return json.dumps({"skill_outcomes_total": db.skill_outcome_count()})
 
 
 # ── 16. skill ──
@@ -1676,3 +1861,166 @@ def skill(
 
     raise ToolError(f"unreachable: action={action!r}")
 
+
+
+# ── 17. gaps ──
+
+
+@mcp.tool(annotations=ToolAnnotations(title="Gaps", readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False))
+def gaps(
+    min_count: int = 3,
+    max_avg_top_score: float = 0.4,
+    limit: int = 20,
+    ctx: Context = None,
+) -> str:
+    """Surface knowledge gaps — frequently-asked, poorly-answered queries
+    (v0.9.0 engine demand log).
+
+    The substrate logs every recall and tracks how often each query is asked
+    + what top scores it surfaces. `knowledge_gaps()` returns the queries
+    that are asked often but answered poorly — the substrate's "known
+    unknowns". Use this to drive proactive learning: when the agent sees a
+    gap, it can ask the user, fetch info, or note the limitation.
+
+    Args:
+        min_count: Only surface queries asked at least this many times.
+        max_avg_top_score: Only surface queries whose best recall score
+            averages below this (lower = poorer answer).
+        limit: Max gaps to return.
+    """
+    db = _get_db(ctx)
+    rows = db.knowledge_gaps(min_count=min_count, max_avg_top_score=max_avg_top_score, limit=limit)
+    return json.dumps({"count": len(rows or []), "gaps": rows or []})
+
+
+# ── 18. conversation ──
+
+
+@mcp.tool(annotations=ToolAnnotations(title="Conversation", readOnlyHint=False, destructiveHint=True, idempotentHint=False, openWorldHint=False))
+def conversation(
+    action: str,
+    namespace: str = "default",
+    role: str | None = None,
+    content: str | None = None,
+    max_turns: int = 10,
+    limit: int = 10,
+    ctx: Context = None,
+) -> str:
+    """Bounded encrypted working-memory ring buffer for raw conversation
+    turns (v0.9.0 engine conversation primitive).
+
+    Unlike `remember` (which stores extracted semantic memories), this stores
+    verbatim turns — useful for short-horizon working memory, e.g. "what
+    exactly did the user say two messages ago". The ring is bounded per
+    namespace; oldest turns evict when `max_turns` is exceeded.
+
+    ACTIONS:
+    - "record":  Append a turn (needs role + content).
+    - "recent":  Retrieve last N turns, oldest-first.
+    - "clear":   Drop the buffer for a namespace.
+
+    Args:
+        action: "record" | "recent" | "clear".
+        namespace: Ring buffer namespace (separate buffers per agent / topic).
+        role: "user" | "assistant" | "system" | "tool" — caller's choice.
+        content: The verbatim turn text.
+        max_turns: Ring size at record time (default 10).
+        limit: How many recent turns to return.
+    """
+    if action not in ("record", "recent", "clear"):
+        raise ToolError("action must be 'record', 'recent', or 'clear'")
+    db = _get_db(ctx)
+
+    if action == "record":
+        if not role or not content:
+            raise ToolError("role and content required for action='record'")
+        db.record_turn(namespace, role, content, max_turns=max_turns)
+        return json.dumps({"recorded": True, "namespace": namespace, "role": role})
+
+    if action == "recent":
+        turns = db.recent_turns(namespace, limit=limit) or []
+        return json.dumps({"count": len(turns), "namespace": namespace, "turns": turns})
+
+    if action == "clear":
+        removed = db.clear_turns(namespace)
+        return json.dumps({"namespace": namespace, "removed": removed})
+
+    raise ToolError(f"unreachable: action={action!r}")
+
+
+# ── 19. task ──
+
+
+@mcp.tool(annotations=ToolAnnotations(title="Task", readOnlyHint=False, destructiveHint=True, idempotentHint=False, openWorldHint=False))
+def task(
+    action: str,
+    namespace: str = "default",
+    title: str | None = None,
+    priority: str = "medium",
+    parent_id: str | None = None,
+    task_id: str | None = None,
+    status: str | None = None,
+    ctx: Context = None,
+) -> str:
+    """Substrate-backed task / chore store (v0.9.0 engine).
+
+    A thin general-purpose to-do tracker baked into yantrikdb — survives
+    sessions, lives next to memories so future agents see open tasks at
+    session_digest time.
+
+    ACTIONS:
+    - "add":    Create a task (needs title; optional priority + parent_id).
+    - "get":    Fetch one task by id.
+    - "list":   List tasks in a namespace, optionally filtered by status.
+    - "update": Update status and/or priority (needs task_id).
+    - "delete": Delete a task (needs task_id).
+
+    PRIORITY: "low" | "medium" | "high" — priority-ordered in `list`.
+    STATUS:   typically "open" | "doing" | "done" | "blocked".
+
+    Args:
+        action: "add" | "get" | "list" | "update" | "delete".
+        namespace: Per-project / per-agent isolation.
+        title: Task description (for add).
+        priority: "low" | "medium" | "high" (for add / update).
+        parent_id: Optional parent task id (for add — sub-task tree).
+        task_id: Task id (for get / update / delete).
+        status: Filter (for list) or new value (for update).
+    """
+    if action not in ("add", "get", "list", "update", "delete"):
+        raise ToolError("action must be 'add', 'get', 'list', 'update', or 'delete'")
+    db = _get_db(ctx)
+
+    if action == "add":
+        if not title or not title.strip():
+            raise ToolError("title required for action='add'")
+        tid = db.task_add(namespace, title.strip(), priority=priority, parent_id=parent_id)
+        return json.dumps({"task_id": tid, "title": title.strip(), "priority": priority})
+
+    if action == "get":
+        if not task_id:
+            raise ToolError("task_id required for action='get'")
+        row = db.task_get(task_id)
+        if row is None:
+            return _err(f"task {task_id!r} not found", task_id=task_id)
+        return json.dumps(row)
+
+    if action == "list":
+        rows = db.task_list(namespace, status=status) or []
+        return json.dumps({"count": len(rows), "namespace": namespace, "tasks": rows})
+
+    if action == "update":
+        if not task_id:
+            raise ToolError("task_id required for action='update'")
+        if status is None and priority is None:
+            raise ToolError("at least one of status / priority required for action='update'")
+        existed = db.task_update(task_id, status=status, priority=priority)
+        return json.dumps({"task_id": task_id, "updated": existed})
+
+    if action == "delete":
+        if not task_id:
+            raise ToolError("task_id required for action='delete'")
+        removed = db.task_delete(task_id)
+        return json.dumps({"task_id": task_id, "removed": removed})
+
+    raise ToolError(f"unreachable: action={action!r}")
