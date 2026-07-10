@@ -185,16 +185,24 @@ class HttpBackend:
         result = self._post("/v1/forget", {"rid": rid})
         return result.get("found", False)
 
-    def correct(self, rid: str, new_text: str, *,
+    def correct(self, rid: str, reason: str, *,
+                new_text: str | None = None,
                 new_importance=None, new_valence=None,
-                correction_note=None) -> dict:
-        body: dict = {"rid": rid, "new_text": new_text}
+                metadata_merge: dict | None = None) -> dict:
+        """Engine v0.7.20+ correct signature (Issue #47): reason is required,
+        `correction_note` is gone, `new_text` is now optional. HTTP backend
+        mirrors the embedded shape."""
+        if not reason or not reason.strip():
+            raise ValueError("reason must be non-empty")
+        body: dict = {"rid": rid, "reason": reason}
+        if new_text is not None:
+            body["new_text"] = new_text
         if new_importance is not None:
             body["new_importance"] = new_importance
         if new_valence is not None:
             body["new_valence"] = new_valence
-        if correction_note:
-            body["correction_note"] = correction_note
+        if metadata_merge:
+            body["metadata_merge"] = metadata_merge
         return self._post("/v1/correct", body)
 
     def think(self, config=None) -> "ThinkResult":
