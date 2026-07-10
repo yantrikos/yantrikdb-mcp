@@ -363,3 +363,78 @@ def test_remember_draft_from_summary(mcp_proc):
     assert not is_err
     # Body shape varies by engine; just confirm non-empty dict
     assert isinstance(body, dict)
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Regression: correct tool signature (v0.9.1 — engine v0.7.20+ change)
+# ─────────────────────────────────────────────────────────────────────
+
+
+def test_correct_tool_accepts_reason_and_works_e2e(mcp_proc):
+    """v0.9.1 regression pin — engine v0.7.20 (Issue #47) made `reason`
+    required and removed `correction_note` on `db.correct()`. Prior to
+    v0.9.1 the MCP `correct` tool passed `correction_note=` and blew up
+    with `unexpected keyword argument 'correction_note'` for every user
+    on engine >=0.7.20. This test would have caught it: create a
+    memory, then correct it via the tool, then assert the result shape."""
+    # 1) Record a memory to correct
+    is_err, body = _unwrap(_call_tool(
+        mcp_proc, "remember", 200,
+        text="Python 3.11 is the target for the build.",
+        domain="architecture",
+    ))
+    assert not is_err, f"seed remember failed: {body}"
+    seed_rid = body["rid"]
+
+    # 2) Correct with the new-signature args (reason required)
+    is_err, body = _unwrap(_call_tool(
+        mcp_proc, "correct", 201,
+        rid=seed_rid,
+        reason="Switched from 3.11 to 3.12 after adopting new deps",
+        new_text="Python 3.12 is the target for the build.",
+    ))
+    assert not is_err, f"correct failed: {body}"
+    # Engine v0.7.20+ mutates in-place; the response includes corrected_rid
+    assert body.get("corrected_rid") is not None
+    assert body.get("reason", "").startswith("Switched")
+
+
+def test_correct_tool_reason_is_required(mcp_proc):
+    """Missing reason must fail loud (schema-level rejection) before the
+    engine sees the call — matches v0.7.20's contract."""
+    is_err, body = _unwrap(_call_tool(
+        mcp_proc, "remember", 210,
+        text="Any old memory",
+    ))
+    assert not is_err
+    rid = body["rid"]
+
+    is_err, body = _unwrap(_call_tool(
+        mcp_proc, "correct", 211,
+        rid=rid, reason="",  # empty — must reject
+        new_text="Doesn't matter",
+    ))
+    assert is_err
+    assert "reason" in str(body).lower()
+
+
+def test_memory_update_importance_uses_new_correct_signature(mcp_proc):
+    """The `memory(action="update_importance")` action calls `db.correct()`
+    internally. Before v0.9.1 it passed `correction_note=`, which would
+    have exploded on any engine >=0.7.20. This regression pins the
+    action against the new signature."""
+    is_err, body = _unwrap(_call_tool(
+        mcp_proc, "remember", 220,
+        text="A minor detail worth remembering.",
+        importance=0.4,
+    ))
+    assert not is_err
+    rid = body["rid"]
+
+    is_err, body = _unwrap(_call_tool(
+        mcp_proc, "memory", 221,
+        action="update_importance", rid=rid, importance=0.9,
+    ))
+    assert not is_err, f"update_importance failed: {body}"
+    assert body["new_importance"] == 0.9
+    assert body["status"] == "updated"

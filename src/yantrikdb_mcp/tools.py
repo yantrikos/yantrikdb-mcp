@@ -308,38 +308,58 @@ def forget(
 @mcp.tool(annotations=ToolAnnotations(title="Correct", readOnlyHint=False, destructiveHint=True, idempotentHint=False, openWorldHint=False))
 def correct(
     rid: str,
-    new_text: str,
+    reason: str,
+    new_text: str | None = None,
     new_importance: float | None = None,
     new_valence: float | None = None,
-    correction_note: str | None = None,
+    metadata_merge: dict | None = None,
     ctx: Context = None,
 ) -> str:
-    """Correct an existing memory — tombstones the old one and creates a corrected version.
+    """Correct an existing memory in-place with a revision-history entry
+    (engine v0.7.20+, Issue #47).
 
     WHEN TO USE: When the user corrects a recalled fact.
     - "Actually, we're using Python 3.12, not 3.11" → correct the memory.
-    Preserves history and transfers entity relationships to the new memory.
+
+    Preserves history via an append-only revision entry keyed on `reason`.
+    Entity relationships stay attached to the same rid (in-place mutation,
+    not a tombstone+new-rid dance).
 
     Args:
         rid: The memory ID to correct.
-        new_text: The corrected text content.
+        reason: **Required** — why the correction was made. Non-empty.
+            Recorded on the revision-history entry so future recall +
+            audit can reconstruct why the memory changed.
+        new_text: Optional new text (pass None to keep existing).
         new_importance: Optional updated importance (0.0-1.0).
         new_valence: Optional updated valence (-1.0 to 1.0).
-        correction_note: Why the correction was made.
+        metadata_merge: Optional dict to merge into existing metadata
+            (None = keep as-is).
     """
-    if not new_text or not new_text.strip():
-        raise ToolError("new_text must be non-empty")
+    if not reason or not reason.strip():
+        raise ToolError("reason must be non-empty")
+    if new_text is not None and not new_text.strip():
+        raise ToolError("new_text may be omitted, but if provided must be non-empty")
 
     db = _get_db(ctx)
     try:
-        result = db.correct(rid, new_text, new_importance=new_importance,
-                            new_valence=new_valence, correction_note=correction_note)
+        result = db.correct(
+            rid,
+            reason.strip(),
+            new_text=(new_text.strip() if new_text else None),
+            metadata_merge=metadata_merge,
+            new_importance=new_importance,
+            new_valence=new_valence,
+        )
     except Exception as e:
         return _err(str(e), rid=rid)
+    # v0.7.20+ mutates in place: corrected_rid == rid. Return both for
+    # backward-compatible response shape.
     return json.dumps({
-        "original_rid": result["original_rid"],
-        "corrected_rid": result["corrected_rid"],
-        "original_tombstoned": result["original_tombstoned"],
+        "rid": result.get("corrected_rid") or rid,
+        "corrected_rid": result.get("corrected_rid") or rid,
+        "original_rid": result.get("original_rid") or rid,
+        "reason": reason.strip(),
     })
 
 
@@ -559,9 +579,16 @@ def memory(
         mem = db.get(rid)
         if mem is None:
             return _err("Memory not found", rid=rid)
-        result = db.correct(rid, mem["text"], new_importance=max(0.0, min(1.0, importance)),
-                            correction_note=f"Importance adjusted from {mem['importance']} to {importance}")
-        return json.dumps({"rid": result["corrected_rid"], "old_importance": mem["importance"],
+        # Engine v0.7.20+ signature: reason is required + first positional
+        # after rid; new_text is optional (we keep the existing text here
+        # since this action only mutates importance).
+        result = db.correct(
+            rid,
+            f"Importance adjusted from {mem['importance']} to {importance}",
+            new_importance=max(0.0, min(1.0, importance)),
+        )
+        corrected_rid = result.get("corrected_rid") or rid
+        return json.dumps({"rid": corrected_rid, "old_importance": mem["importance"],
                            "new_importance": importance, "status": "updated"})
 
     if action == "archive":
