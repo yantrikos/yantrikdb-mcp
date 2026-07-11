@@ -1,11 +1,14 @@
 """FastMCP server definition with YantrikDB lifespan context."""
 
 import atexit
+import ast
+import inspect
 import logging
 import os
 import sys
 import threading
 import time
+import textwrap
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -217,6 +220,53 @@ def _emit_skill_safety_warnings() -> None:
         })
 
 
+def _validate_tool_signatures(engine_class, tools_module) -> None:
+    """Fail startup when a tool forwards an unknown engine keyword."""
+    mismatches = []
+    for tool_name, tool in vars(tools_module).items():
+        if tool_name.startswith("_") or not inspect.isfunction(tool):
+            continue
+        try:
+            tree = ast.parse(textwrap.dedent(inspect.getsource(tool)))
+        except (OSError, TypeError, IndentationError, SyntaxError):
+            continue
+
+        for call in ast.walk(tree):
+            if not (
+                isinstance(call, ast.Call)
+                and isinstance(call.func, ast.Attribute)
+                and isinstance(call.func.value, ast.Name)
+                and call.func.value.id == "db"
+            ):
+                continue
+
+            method_name = call.func.attr
+            try:
+                signature = inspect.signature(getattr(engine_class, method_name))
+            except (AttributeError, TypeError, ValueError):
+                continue
+            accepts_kwargs = any(
+                p.kind == inspect.Parameter.VAR_KEYWORD
+                for p in signature.parameters.values()
+            )
+            if accepts_kwargs:
+                continue
+            for keyword in call.keywords:
+                if keyword.arg is not None and keyword.arg not in signature.parameters:
+                    mismatches.append((tool_name, method_name, keyword.arg))
+
+    for tool_name, method_name, parameter in mismatches:
+        log.error(
+            "MCP TOOL SIGNATURE MISMATCH: tool '%s' forwards parameter '%s' "
+            "but YantrikDB.%s() does not accept it",
+            tool_name, parameter, method_name,
+        )
+    if mismatches:
+        raise RuntimeError(
+            f"MCP tool signature validation failed with {len(mismatches)} mismatch(es)"
+        )
+
+
 # Process-singleton `_LazyDB`. Under SSE transport, FastMCP/uvicorn
 # enters the `lifespan` context once per client session. The v0.8.1
 # implementation constructed a fresh `_LazyDB` on every entry and
@@ -257,6 +307,7 @@ async def lifespan(app: FastMCP):
     session yields the same `_LazyDB` instance. Close happens once via
     `atexit`, not per-session. See yantrikos/yantrikdb-mcp#11.
     """
+    _validate_tool_signatures(YantrikDB, _tools)
     lazy = _get_lazy_singleton()
     log.info("YantrikDB MCP server started (model loads on first use)")
     _emit_skill_safety_warnings()
