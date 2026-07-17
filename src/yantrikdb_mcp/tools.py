@@ -1,6 +1,7 @@
 """MCP tool implementations for YantrikDB cognitive memory engine."""
 
 import json
+import logging
 import os
 import time
 
@@ -9,6 +10,36 @@ from mcp.server.fastmcp.exceptions import ToolError
 from mcp.types import ToolAnnotations
 
 from .server import mcp
+
+log = logging.getLogger("yantrikdb.mcp.tools")
+
+
+# ── Tool profiles (v0.10.0) ──
+# The full tools/list schema costs ~9.8k tokens per session on every client
+# BEFORE any call is made. The `core` profile advertises only the 10
+# golden-path tools the injected INSTRUCTIONS choreography uses (cold-start
+# digest, recall/remember/correct capture, chain_head current-value, graph
+# relate, procedure surface/learn, think + conflict wrap-up, forget) —
+# a ~36% schema reduction. Design per the sol-converged verdict: profiles
+# expose FEWER INTACT tools; no mergers, no renamed aliases (aliases erase
+# the savings), no router meta-tool (destroys permission-UI honesty).
+# Default is `full` so no existing deployment loses tools silently; `core`
+# is opt-in via YANTRIKDB_TOOL_PROFILE=core.
+_PROFILE = os.environ.get("YANTRIKDB_TOOL_PROFILE", "full").strip().lower()
+if _PROFILE not in ("core", "full"):
+    log.warning("Unknown YANTRIKDB_TOOL_PROFILE=%r — using 'full'", _PROFILE)
+    _PROFILE = "full"
+
+
+def _specialist_tool(**kw):
+    """Decorator for tools advertised only in the `full` profile.
+
+    In the `core` profile the function is left unregistered — the tool
+    simply doesn't appear in tools/list, so agents can't half-see it.
+    (Honest surface: absent beats advertised-but-degraded.)"""
+    if _PROFILE == "core":
+        return lambda fn: fn
+    return mcp.tool(**kw)
 
 
 def _get_db(ctx: Context):
@@ -23,6 +54,69 @@ def _get_db(ctx: Context):
 def _err(msg, **extra):
     """Soft error — valid call but nothing to return (not found, empty results)."""
     return json.dumps({"error": msg, **extra})
+
+
+def _translate_idempotency_error(e: Exception, key: str) -> str | None:
+    """Translate v0.10 engine idempotency failures into agent-actionable MCP
+    errors. Branch on TYPE (PR #107), never message regex. Returns None when
+    the exception isn't idempotency-related (caller re-raises).
+
+    The (InvalidIdempotencyKey, ValueError) pairing is core's recorded
+    decision: InvalidIdempotencyKey is an ENGINE verdict about the key;
+    the bare ValueError is the WRAPPER's capability refusal on a
+    python-fallback (ONNX/multilingual) embedder — a host-config error,
+    typed deliberately differently. Both mean "this call, as configured,
+    cannot be keyed" and both must name the fix, not just the symptom."""
+    import yantrikdb
+
+    conflict_cls = getattr(yantrikdb, "IdempotencyConflict", None)
+    invalid_cls = getattr(yantrikdb, "InvalidIdempotencyKey", None)
+    if conflict_cls is not None and isinstance(e, conflict_cls):
+        # Claim-resolution territory — usually same key with DIFFERENT
+        # payload. The message carries the existing rid; surface it.
+        return _err(
+            f"idempotency conflict on key {key!r}: {e}. Same key must carry "
+            f"the same text — use a new key for new content, or drop the key "
+            f"to record unconditionally.",
+            idempotency_key=key,
+        )
+    if (invalid_cls is not None and isinstance(e, invalid_cls)) or isinstance(e, ValueError):
+        backend = os.environ.get("YANTRIKDB_EMBEDDER", "auto")
+        return _err(
+            f"idempotency_key not usable here: {e}. Keys require the engine "
+            f"embedder (bundled) backend; this server runs "
+            f"YANTRIKDB_EMBEDDER={backend!r}. Drop the key, or run the "
+            f"bundled backend for exactly-once writes.",
+            idempotency_key=key,
+        )
+    return None
+
+
+# ── v0.10.0 response-shaping helpers ──
+# Token optimization: engine responses carry full-precision floats and,
+# occasionally, null fields that cost tokens on every call without helping
+# the agent. These helpers shape a response before serialization.
+#
+# DELIBERATELY NOT a recursive float-rounder: timestamps, thresholds,
+# calibration weights, user-supplied values, and mutation receipts are
+# contract data that must not be silently truncated (and in HTTP-cluster
+# mode the raw value is NOT re-derivable client-side). Rounding is applied
+# per-field, explicitly, only to display-oriented ranking values.
+
+_FLOAT_ROUND_PLACES = 3
+
+
+def _prune_nulls(d: dict, keys: tuple[str, ...]) -> dict:
+    """Drop ONLY the named keys when their value is None. Scoped by an
+    explicit allowlist — a field is prunable only when "absent" carries the
+    same meaning as "null" for that field (e.g. `emotional_state`). Fields
+    where null is semantically load-bearing (`active_session`,
+    `narrative_head`, mutation receipts) must never be passed here."""
+    return {k: v for k, v in d.items() if not (k in keys and v is None)}
+
+
+# Recall result fields where null == absent (safe to prune).
+_RECALL_PRUNABLE_NULLS = ("emotional_state",)
 
 
 # ── 1. remember ──
@@ -42,6 +136,7 @@ def remember(
     emotional_state: str | None = None,
     memories: list[dict] | None = None,
     summary: str | None = None,
+    idempotency_key: str | None = None,
     ctx: Context = None,
 ) -> str:
     """Store one or more memories in persistent cognitive memory.
@@ -71,6 +166,11 @@ def remember(
         emotional_state: joy, frustration, excitement, concern, neutral.
         memories: List of memory dicts for batch.
         summary: For draft mode — long summary that the engine atomizes.
+        idempotency_key: v0.10 engine — makes the write exactly-once: retrying
+            with the same key + same text returns the SAME rid with no second
+            write; same key + different text is an error. Engine-embedder
+            (bundled) backend only. On batch, the key scopes per item as
+            "{key}:{index}" if the atomic batch path is unavailable.
     """
     db = _get_db(ctx)
 
@@ -112,14 +212,24 @@ def remember(
                 results = db.record_batch(inputs)
                 if isinstance(results, list):
                     return json.dumps({"rids": results, "count": len(results), "status": "recorded"})
-            except Exception:
-                # fall through to loop
-                pass
+            except Exception as e:
+                # Fall through to the per-item loop — but never silently:
+                # if record_batch partially wrote before failing, an unkeyed
+                # loop re-records those items. With a caller-supplied
+                # idempotency_key the loop below keys each item
+                # "{key}:{index}" (core's contracted design), so the retry
+                # dedupes instead of double-writing.
+                log.warning(
+                    "record_batch failed (%s: %s) — falling back to per-item "
+                    "loop for %d memories%s",
+                    type(e).__name__, e, len(inputs),
+                    " (keyed per-item — retry-safe)" if idempotency_key
+                    else "; duplicates possible if the batch partially committed",
+                )
 
         results = []
-        for mem in inputs:
-            rid = db.record(
-                mem["text"],
+        for i, mem in enumerate(inputs):
+            item_kwargs = dict(
                 memory_type=mem["memory_type"],
                 importance=mem["importance"],
                 valence=mem["valence"],
@@ -130,12 +240,31 @@ def remember(
                 source=mem["source"],
                 emotional_state=mem["emotional_state"],
             )
+            if idempotency_key:
+                item_kwargs["idempotency_key"] = f"{idempotency_key}:{i}"
+            try:
+                rid = db.record(mem["text"], **item_kwargs)
+            except Exception as e:
+                if idempotency_key:
+                    translated = _translate_idempotency_error(e, f"{idempotency_key}:{i}")
+                    if translated is not None:
+                        return translated
+                raise
             results.append(rid)
         return json.dumps({"rids": results, "count": len(results), "status": "recorded"})
 
     # Single mode
     if not text or not text.strip():
-        raise ToolError("text must be non-empty")
+        # Dogfood finding: an agent that passes the memory body under a
+        # wrong parameter name (content=/message=/body=) has it silently
+        # dropped by schema validation and lands here — so name the likely
+        # cause, not just the symptom.
+        raise ToolError(
+            "text must be non-empty. The memory body goes in the `text` "
+            "parameter (content=/message=/body= are not recognized and are "
+            "silently dropped). For batch use memories=[...], for "
+            "end-of-session capture use summary=."
+        )
     text = text.strip()
 
     importance = max(0.0, min(1.0, importance))
@@ -146,18 +275,28 @@ def remember(
     if memory_type not in valid_types:
         raise ToolError(f"memory_type must be one of {valid_types}, got '{memory_type}'")
 
-    rid = db.record(
-        text, memory_type=memory_type, importance=importance, valence=valence,
+    record_kwargs = dict(
+        memory_type=memory_type, importance=importance, valence=valence,
         metadata=metadata or {}, namespace=namespace, certainty=certainty,
         domain=domain, source=source, emotional_state=emotional_state,
     )
+    if idempotency_key:
+        record_kwargs["idempotency_key"] = idempotency_key
+    try:
+        rid = db.record(text, **record_kwargs)
+    except Exception as e:
+        if idempotency_key:
+            translated = _translate_idempotency_error(e, idempotency_key)
+            if translated is not None:
+                return translated
+        raise
     return json.dumps({"rid": rid, "status": "recorded"})
 
 
 # ── 2. recall ──
 
 
-@mcp.tool(annotations=ToolAnnotations(title="Recall", readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False))
+@mcp.tool(annotations=ToolAnnotations(title="Recall", readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False))
 def recall(
     query: str,
     top_k: int = 10,
@@ -166,36 +305,36 @@ def recall(
     source: str | None = None,
     namespace: str | None = None,
     include_consolidated: bool = False,
+    include_superseded: bool = False,
     expand_entities: bool = True,
     refine_from: str | None = None,
     refine_exclude: list[str] | None = None,
-    feedback_rid: str | None = None,
-    feedback: str | None = None,
-    feedback_score: float | None = None,
-    feedback_rank: int | None = None,
     ctx: Context = None,
 ) -> str:
-    """Search memories by semantic similarity, refine low-confidence results, or give feedback.
+    """Search memories by semantic similarity, or refine low-confidence results.
 
     MODES:
     - **Search** (default): recall("project architecture decisions")
     - **Refine**: recall("PostgreSQL vs MySQL decision", refine_from="database choice", refine_exclude=["rid1"])
-    - **Feedback**: recall(query="", feedback_rid="abc", feedback="relevant")
+    (Relevance feedback moved to memory(action="feedback") in v0.10 — recall
+    is now purely read-only.)
 
-    WHEN TO USE:
-    - At conversation start: recall a summary of the user's first message.
-    - When user references past decisions, people, preferences, or "last time".
-    - When unsure about something the user assumes you know.
-    - Use refine_from when first recall had low confidence (< 0.5).
-    - Use feedback_rid after using a recalled memory to improve future retrieval.
+    WHEN TO USE: conversation start (summarize the user's first message); when
+    the user references past decisions, people, preferences, or "last time";
+    when unsure about something the user assumes you know. Refine when first
+    confidence < 0.5. After USING a recalled memory, reinforce it via
+    memory(action="feedback", rid=..., feedback="relevant").
+    For "what is the CURRENT/latest X", prefer memory(action="chain_head") —
+    similarity favors the most-similar revision, not the newest.
 
-    QUERY GUIDELINES:
-    - Use a short natural language sentence (5-10 words), NOT keyword lists.
-    - GOOD: "private retail demo with shift brain"
-    - GOOD: "user's architecture preferences"
-    - BAD:  "private retail demo stunning pitch shift brain yantrikdb rewritten reality private operations memory"
-    - Keyword stuffing degrades recall quality and is slower. Ask one focused question per call.
-    - If you need multiple topics, make separate recall calls.
+    QUERY: one short natural-language sentence (5-10 words), NOT a keyword
+    list — keyword stuffing degrades quality. One focused question per call;
+    separate calls for separate topics.
+
+    TRUST SIGNALS: each hit's `why_retrieved` may carry staleness warnings
+    ("aged", "rarely confirmed", "superseded by a newer record"). Treat
+    flagged hits as weak evidence — prefer fresher results or chain_head,
+    and note the flag if you act on one anyway.
 
     Args:
         query: Short natural language sentence (5-10 words). NOT a keyword list.
@@ -205,26 +344,24 @@ def recall(
         source: Filter: "user", "inference", "document", "system".
         namespace: Filter by namespace.
         include_consolidated: Include merged memories.
+        include_superseded: v0.10 — recall EXCLUDES superseded records by
+            default (current-by-default). Set True only for history /
+            archaeology over a revision chain.
         expand_entities: Use knowledge graph boosting (default True).
         refine_from: Original query text to refine from. query becomes the refinement.
         refine_exclude: Memory IDs to exclude when refining.
-        feedback_rid: Memory ID to give feedback on (switches to feedback mode).
-        feedback: "relevant" or "irrelevant" (required with feedback_rid).
-        feedback_score: Score at retrieval (helps learning).
-        feedback_rank: Rank position at retrieval.
     """
     db = _get_db(ctx)
 
-    # Feedback mode
-    if feedback_rid:
-        if feedback not in ("relevant", "irrelevant"):
-            raise ToolError("feedback must be 'relevant' or 'irrelevant'")
-        db.recall_feedback(
-            rid=feedback_rid, feedback=feedback,
-            query_text=query or None, score_at_retrieval=feedback_score,
-            rank_at_retrieval=feedback_rank,
+    # Pre-v0.10 feedback calls used query="" with feedback_rid — that param
+    # moved to memory(action="feedback") and schema validation now drops it,
+    # which would land here as a bare empty search. Name the migration.
+    if (not query or not query.strip()) and not refine_from:
+        raise ToolError(
+            "query must be non-empty. (Recall feedback moved to "
+            "memory(action='feedback', rid=..., feedback='relevant'|"
+            "'irrelevant') in v0.10 — recall is now read-only.)"
         )
-        return json.dumps({"rid": feedback_rid, "feedback": feedback, "status": "recorded"})
 
     # Refine mode
     if refine_from:
@@ -236,7 +373,9 @@ def recall(
         )
         items = [
             {"rid": r["rid"], "text": r["text"], "type": r["type"],
-             "score": round(r["score"], 4), "importance": r["importance"], "created_at": r["created_at"]}
+             "score": round(r["score"], 4),
+             "importance": round(r["importance"], _FLOAT_ROUND_PLACES),
+             "created_at": r["created_at"]}
             for r in response["results"]
         ]
         hints = [
@@ -246,17 +385,42 @@ def recall(
         return json.dumps({"count": len(items), "results": items, "confidence": round(response["confidence"], 4), "hints": hints})
 
     # Search mode (default)
-    response = db.recall_with_response(
-        query=query, top_k=top_k, memory_type=memory_type,
-        include_consolidated=include_consolidated, expand_entities=expand_entities,
-        namespace=namespace, domain=domain, source=source,
-    )
-    items = [
-        {"rid": r["rid"], "text": r["text"], "type": r["type"],
-         "score": round(r["score"], 4), "importance": r["importance"],
-         "why_retrieved": r["why_retrieved"]}
-        for r in response["results"]
-    ]
+    if include_superseded:
+        # recall_with_response has no include_superseded flag (gap reported
+        # to core 2026-07-17) — the archaeology path goes through db.recall,
+        # which returns the same per-item fields minus the hints envelope.
+        rows = db.recall(
+            query=query, top_k=top_k, memory_type=memory_type,
+            include_consolidated=include_consolidated,
+            expand_entities=expand_entities,
+            namespace=namespace, domain=domain, source=source,
+            include_superseded=True,
+        )
+        response = {
+            "results": rows or [],
+            "confidence": max((r.get("score", 0.0) for r in rows or []), default=0.0),
+            "hints": [],
+        }
+    else:
+        response = db.recall_with_response(
+            query=query, top_k=top_k, memory_type=memory_type,
+            include_consolidated=include_consolidated, expand_entities=expand_entities,
+            namespace=namespace, domain=domain, source=source,
+        )
+    items = []
+    for r in response["results"]:
+        item = {
+            "rid": r["rid"], "text": r["text"], "type": r["type"],
+            # A1: round importance — engine emits a raw temporal-decay float
+            # like 0.8955510184601201; three places is well past what any
+            # agent reasons over. score stays at 4 (ranking granularity).
+            "score": round(r["score"], 4),
+            "importance": round(r["importance"], _FLOAT_ROUND_PLACES),
+            "why_retrieved": r["why_retrieved"],
+            "emotional_state": r.get("emotional_state"),
+        }
+        # A3: prune only the allowlisted safe null (emotional_state).
+        items.append(_prune_nulls(item, _RECALL_PRUNABLE_NULLS))
     hints = [
         {"hint_type": h["hint_type"], "suggestion": h["suggestion"]}
         for h in response["hints"]
@@ -386,6 +550,7 @@ def think(
     split_oversized: bool = False,
     split_min_chars: int = 1500,
     repair_artifacts: bool = False,
+    maintenance_op: str | None = None,
     ctx: Context = None,
 ) -> str:
     """Run incremental cognitive maintenance — processes a small batch per call.
@@ -402,6 +567,9 @@ def think(
       backfill-entities + auto-relate (+ optional split_oversized + repair_artifacts).
     - last_cycle_only=True: just fetch the last persisted maintenance-cycle
       summary (read-only, no work performed).
+    - maintenance_op="backfill_entities"|"rebuild_vec_index"|"rebuild_graph_index":
+      run ONE targeted index-maintenance op and return. (Moved here from
+      stats in v0.10 so stats could become read-only.)
 
     Args:
         run_consolidation: Merge similar memories (default on).
@@ -420,6 +588,23 @@ def think(
         repair_artifacts: Maintenance-cycle knobs.
     """
     db = _get_db(ctx)
+
+    # Targeted index-maintenance op (moved from stats in v0.10)
+    if maintenance_op is not None:
+        valid_ops = ("backfill_entities", "rebuild_vec_index", "rebuild_graph_index")
+        if maintenance_op not in valid_ops:
+            raise ToolError(f"maintenance_op must be one of {valid_ops}")
+        t0 = time.time()
+        if maintenance_op == "backfill_entities":
+            result = db.backfill_memory_entities()
+        elif maintenance_op == "rebuild_vec_index":
+            db.rebuild_vec_index()
+            result = "ok"
+        else:
+            db.rebuild_graph_index()
+            result = "ok"
+        elapsed_ms = round((time.time() - t0) * 1000, 1)
+        return json.dumps({"action": maintenance_op, "result": result, "elapsed_ms": elapsed_ms})
 
     # last_cycle_only — read-only short-circuit
     if last_cycle_only:
@@ -487,11 +672,15 @@ def memory(
     namespace: str | None = None,
     sort_by: str = "created_at",
     text_contains: str | None = None,
+    feedback: str | None = None,
+    feedback_query: str | None = None,
+    feedback_score: float | None = None,
+    feedback_rank: int | None = None,
     ctx: Context = None,
 ) -> str:
     """Manage individual memories — get, list, search, update importance, archive,
-    hydrate, fetch a chain-shaped namespace's head (v0.8.0), or query revision
-    history (v0.8.0+).
+    hydrate, relevance feedback, fetch a chain-shaped namespace's head, or query
+    revision history.
 
     ACTIONS:
     - "get":               Retrieve a single memory by rid.
@@ -500,19 +689,42 @@ def memory(
     - "update_importance": Change a memory's importance score.
     - "archive":           Move to cold storage.
     - "hydrate":           Restore archived memory.
-    - "chain_head":        v0.8.0 — head (most recent entry) of a chain-shaped
-                           namespace. Useful for narrative / decision chains.
+    - "feedback":          v0.10 — relevance feedback on a recalled memory
+                           (needs rid + feedback="relevant"|"irrelevant").
+                           Call after USING a recalled memory; it tunes future
+                           retrieval. (Moved here from recall, which is now
+                           read-only.)
+    - "chain_head":        The CURRENT value of a chain-shaped namespace
+                           (narrative / decision / config chains). Use this —
+                           not recall — for "what is the current/latest X":
+                           similarity search favors the most-similar revision,
+                           chain_head returns the newest.
     - "history":           v0.8.0 — revision history for a single rid (needs rid).
 
     Args:
         See action docs above. New args:
         namespace: Required for chain_head — the chain-shaped namespace.
-        rid: Required for history — record to fetch revisions for.
+        rid: Required for history/feedback — the record acted on.
+        feedback: For feedback — "relevant" or "irrelevant".
+        feedback_query: For feedback — the query that surfaced the memory.
+        feedback_score / feedback_rank: For feedback — retrieval context.
     """
     valid = ("get", "list", "search", "update_importance", "archive", "hydrate",
-             "chain_head", "history")
+             "feedback", "chain_head", "history")
     if action not in valid:
         raise ToolError(f"action must be one of {valid}")
+
+    if action == "feedback":
+        if not rid:
+            raise ToolError("rid required for feedback")
+        if feedback not in ("relevant", "irrelevant"):
+            raise ToolError("feedback must be 'relevant' or 'irrelevant'")
+        db = _get_db(ctx)
+        db.recall_feedback(
+            rid=rid, feedback=feedback, query_text=feedback_query or None,
+            score_at_retrieval=feedback_score, rank_at_retrieval=feedback_rank,
+        )
+        return json.dumps({"rid": rid, "feedback": feedback, "status": "recorded"})
 
     db = _get_db(ctx)
 
@@ -864,7 +1076,7 @@ def conflict(
 # ── 9. trigger ──
 
 
-@mcp.tool(annotations=ToolAnnotations(title="Trigger", readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False))
+@_specialist_tool(annotations=ToolAnnotations(title="Trigger", readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False))
 def trigger(
     action: str = "pending",
     trigger_id: str | None = None,
@@ -947,9 +1159,13 @@ def session(
     client_id: str = "default",
     metadata: dict | None = None,
     summary: str | None = None,
+    domain: str = "general",
     limit: int = 10,
     abandon_stale_hours: float | None = None,
     narrative_namespace: str | None = None,
+    scope: str | None = None,
+    include_gaps: bool = False,
+    max_gaps: int = 5,
     max_decisions: int = 8,
     max_conflicts: int = 5,
     max_triggers: int = 5,
@@ -961,28 +1177,43 @@ def session(
 
     ACTIONS:
     - "start":   Begin a new session. Returns session_id.
-    - "end":     End a session (needs session_id). Returns stats.
+    - "end":     End a TRACKED session (needs session_id). Returns stats.
+                 This closes session bookkeeping — it does NOT capture memories.
+    - "capture": Segment a free-text session summary into atomic candidate
+                 memories (needs summary; NO session_id — it operates on the
+                 text, not on tracked-session state). Returns drafted rids.
+                 Use at end of substantial work so the session leaves a trace.
     - "history": View past sessions.
     - "active":  Check if there's a running session.
     - "abandon_stale": Clean up orphaned sessions older than abandon_stale_hours.
     - "digest":  One-call boot-time briefing (v0.9.0) — narrative chain head,
                  open decisions/conflicts/triggers, top stale memories.
                  Call this at conversation start instead of N separate recalls.
+                 Set include_gaps=True to fold known-unknowns (frequently-asked,
+                 poorly-answered queries) into the briefing — the active-learning
+                 loop. Set scope to filter content aggregates to one namespace
+                 for a per-tenant digest.
 
     Args:
-        action: "start", "end", "history", "active", "abandon_stale", "digest".
+        action: "start", "end", "capture", "history", "active", "abandon_stale", "digest".
         session_id: For end.
         namespace: Memory namespace.
         client_id: Client identifier.
         metadata: For start — optional dict.
-        summary: For end — what happened.
+        summary: For end — optional closing note. For capture — REQUIRED,
+            the session summary to segment into memories.
+        domain: For capture — domain stamped on drafted memories.
         limit: For history.
         abandon_stale_hours: For abandon_stale — max age in hours.
         narrative_namespace: For digest — namespace for the narrative chain.
+        scope: For digest — filter content aggregates to one namespace
+            (per-tenant isolation); omit for a whole-DB digest.
+        include_gaps: For digest — fold top knowledge gaps into the briefing.
+        max_gaps: For digest — cap on gaps surfaced when include_gaps=True.
         max_decisions / max_conflicts / max_triggers: For digest — surface caps.
         snippet_chars: For digest — text-snippet length per item.
     """
-    valid = ("start", "end", "history", "active", "abandon_stale", "digest")
+    valid = ("start", "end", "capture", "history", "active", "abandon_stale", "digest")
     if action not in valid:
         raise ToolError(f"action must be one of {valid}")
 
@@ -994,8 +1225,30 @@ def session(
 
     if action == "end":
         if not session_id:
-            raise ToolError("session_id required")
+            raise ToolError(
+                "session_id required — 'end' closes a TRACKED session. To "
+                "capture a summary into memories (no session_id), use "
+                "action='capture'."
+            )
         result = db.session_end(session_id, summary)
+        return json.dumps(result)
+
+    if action == "capture":
+        # Server ruling (2026-07-17): capture ≠ tracking-end. Capture
+        # segments a summary STRING into candidate facts — no session_id
+        # exists to look up. Same engine call as remember(summary=);
+        # exposed here so end-of-session choreography lives on `session`.
+        if not summary or not summary.strip():
+            raise ToolError("summary required for capture")
+        result = db.draft_memories_from_summary(
+            summary.strip(), namespace=namespace, domain=domain,
+        )
+        # Normalize cross-backend: embedded returns {"drafted": [...]},
+        # the HTTP gateway returns {"drafted": [...], "count": N}. Agents
+        # get one shape either way.
+        if not isinstance(result, dict):
+            result = {"drafted": result}
+        result.setdefault("count", len(result.get("drafted") or []))
         return json.dumps(result)
 
     if action == "history":
@@ -1012,20 +1265,64 @@ def session(
         return json.dumps({"abandoned_sessions": count, "max_age_hours": hours})
 
     if action == "digest":
-        digest = db.session_digest(
+        # scope / include_gaps / max_gaps are the server v0.8.27 (and newer
+        # embedded engine) additions. Older embedded engines don't accept
+        # them, so pass them only when the caller opted in, and fall back to
+        # the base keyword set on TypeError rather than failing the digest.
+        digest_kwargs = dict(
             narrative_namespace=narrative_namespace,
             max_decisions=max_decisions,
             max_conflicts=max_conflicts,
             max_triggers=max_triggers,
             snippet_chars=snippet_chars,
         )
-        return json.dumps(digest if isinstance(digest, dict) else {"digest": digest})
+        extra_kwargs = {}
+        if scope:
+            extra_kwargs["scope"] = scope
+        if include_gaps:
+            extra_kwargs["include_gaps"] = True
+            extra_kwargs["max_gaps"] = max_gaps
+        dropped_params: list[str] = []
+        try:
+            digest = db.session_digest(**digest_kwargs, **extra_kwargs)
+        except TypeError:
+            if not extra_kwargs:
+                raise
+            dropped_params = sorted(extra_kwargs)
+            log.warning(
+                "session_digest: backend rejected %s — retrying without them "
+                "(engine predates the scope/include_gaps surface)",
+                dropped_params,
+            )
+            digest = db.session_digest(**digest_kwargs)
+        # The engine returns the digest as a JSON STRING. Passing it through
+        # untouched produced a double-encoded `{"digest": "{\"...\":...}"}`
+        # envelope — the agent had to JSON-parse a string field to read the
+        # briefing (measured in the v0.10.0 design review). Decode it here so
+        # the client receives a first-class object.
+        if isinstance(digest, str):
+            try:
+                digest = json.loads(digest)
+            except json.JSONDecodeError:
+                return json.dumps({"digest": digest})
+        if not isinstance(digest, dict):
+            digest = {"digest": digest}
+        if dropped_params:
+            # Honest surface: the agent asked for capabilities this engine
+            # predates. Without this note, include_gaps=True silently yields
+            # a digest with no knowledge_gaps and the agent can't tell
+            # "no gaps exist" from "gaps weren't computed".
+            digest["unsupported_params"] = dropped_params
+            digest["unsupported_note"] = (
+                "engine predates these digest params; they were ignored"
+            )
+        return json.dumps(digest)
 
 
 # ── 11. temporal ──
 
 
-@mcp.tool(annotations=ToolAnnotations(title="Temporal", readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False))
+@_specialist_tool(annotations=ToolAnnotations(title="Temporal", readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False))
 def temporal(
     action: str,
     days: float = 30.0,
@@ -1141,7 +1438,7 @@ def procedure(
 # ── 13. category ──
 
 
-@mcp.tool(annotations=ToolAnnotations(title="Category", readOnlyHint=False, destructiveHint=True, idempotentHint=False, openWorldHint=False))
+@_specialist_tool(annotations=ToolAnnotations(title="Category", readOnlyHint=False, destructiveHint=True, idempotentHint=False, openWorldHint=False))
 def category(
     action: str = "list",
     category_name: str | None = None,
@@ -1201,7 +1498,7 @@ def category(
 # ── 14. personality ──
 
 
-@mcp.tool(annotations=ToolAnnotations(title="Personality", readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False))
+@_specialist_tool(annotations=ToolAnnotations(title="Personality", readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False))
 def personality(
     action: str = "get",
     trait_name: str | None = None,
@@ -1244,38 +1541,39 @@ def personality(
 # ── 15. stats ──
 
 
-@mcp.tool(annotations=ToolAnnotations(title="Stats", readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False))
+@_specialist_tool(annotations=ToolAnnotations(title="Stats", readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False))
 def stats(
     action: str = "stats",
     namespace: str | None = None,
-    maintenance_op: str | None = None,
     max_rids: int = 100,
     ctx: Context = None,
 ) -> str:
-    """Engine statistics, health check, learned weights, maintenance ops,
-    privacy/leak audit, and skill substrate counts.
+    """Engine statistics, health check, learned weights, privacy/leak audit,
+    and skill substrate counts. Read-only — index maintenance moved to
+    think(maintenance_op=...) in v0.10.
 
     ACTIONS:
     - "stats":       Detailed memory statistics (default).
     - "health":      Quick health check with latency.
     - "weights":     Show adapted recall scoring weights.
-    - "maintenance": Run maintenance (needs maintenance_op).
     - "audit_leak":  v0.8.0 windowed leak-candidate audit — surfaces recent
                      records that may have leaked sensitive content. Use for
                      privacy review.
     - "skill_outcomes": v0.9.0 — total skill outcomes recorded in the durable
                         timeline.
 
-    MAINTENANCE OPS:
-    - "backfill_entities", "rebuild_vec_index", "rebuild_graph_index".
-
     Args:
         action: One of the actions above.
         namespace: Filter for stats.
-        maintenance_op: For maintenance.
         max_rids: For audit_leak — max candidate rids to inspect.
     """
-    valid = ("stats", "health", "weights", "maintenance", "audit_leak", "skill_outcomes")
+    valid = ("stats", "health", "weights", "audit_leak", "skill_outcomes")
+    if action == "maintenance":
+        raise ToolError(
+            "maintenance moved to think(maintenance_op="
+            "'backfill_entities'|'rebuild_vec_index'|'rebuild_graph_index') "
+            "in v0.10 — stats is now read-only."
+        )
     if action not in valid:
         raise ToolError(f"action must be one of {valid}")
 
@@ -1308,22 +1606,6 @@ def stats(
     if action == "weights":
         weights = db.learned_weights()
         return json.dumps(weights)
-
-    if action == "maintenance":
-        valid_ops = ("backfill_entities", "rebuild_vec_index", "rebuild_graph_index")
-        if maintenance_op not in valid_ops:
-            raise ToolError(f"maintenance_op must be one of {valid_ops}")
-        t0 = time.time()
-        if maintenance_op == "backfill_entities":
-            result = db.backfill_memory_entities()
-        elif maintenance_op == "rebuild_vec_index":
-            db.rebuild_vec_index()
-            result = "ok"
-        else:
-            db.rebuild_graph_index()
-            result = "ok"
-        elapsed_ms = round((time.time() - t0) * 1000, 1)
-        return json.dumps({"action": maintenance_op, "result": result, "elapsed_ms": elapsed_ms})
 
     if action == "audit_leak":
         report = db.audit_leak_candidates(max_rids=max_rids)
@@ -1372,7 +1654,7 @@ def _skill_writes_enabled() -> bool:
     return is_open
 
 
-@mcp.tool(annotations=ToolAnnotations(title="Skill", readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=False))
+@_specialist_tool(annotations=ToolAnnotations(title="Skill", readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=False))
 def skill(
     action: str,
     skill_id: str | None = None,
@@ -1411,14 +1693,10 @@ def skill(
     - "get":     Fetch a single skill by id.
     - "list":    Catalog browse (filter by applies_to / skill_type).
 
-    EXAMPLES:
-    - skill(action="define", skill_id="workflow.git.commit_clean",
-            body="Before commit: run pytest, run lint, write a clear "
-                 "subject + body. Never include co-authored-by unless asked.",
-            skill_type="procedure", applies_to=["git", "release"])
-    - skill(action="surface", query="how to commit cleanly")
-    - skill(action="outcome", skill_id="workflow.git.commit_clean",
-            succeeded=True, note="caught a flake8 issue pre-push")
+    EXAMPLE: skill(action="define", skill_id="workflow.git.commit_clean",
+    body="Before commit: run pytest + lint...", skill_type="procedure",
+    applies_to=["git", "release"]) — then surface(query=...) before similar
+    work, and outcome(skill_id=..., succeeded=True/False) after using one.
 
     Args:
         action: "define", "surface", "outcome", "get", "list".
@@ -1893,7 +2171,7 @@ def skill(
 # ── 17. gaps ──
 
 
-@mcp.tool(annotations=ToolAnnotations(title="Gaps", readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False))
+@_specialist_tool(annotations=ToolAnnotations(title="Gaps", readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False))
 def gaps(
     min_count: int = 3,
     max_avg_top_score: float = 0.4,
@@ -1923,7 +2201,7 @@ def gaps(
 # ── 18. conversation ──
 
 
-@mcp.tool(annotations=ToolAnnotations(title="Conversation", readOnlyHint=False, destructiveHint=True, idempotentHint=False, openWorldHint=False))
+@_specialist_tool(annotations=ToolAnnotations(title="Conversation", readOnlyHint=False, destructiveHint=True, idempotentHint=False, openWorldHint=False))
 def conversation(
     action: str,
     namespace: str = "default",
@@ -1978,7 +2256,7 @@ def conversation(
 # ── 19. task ──
 
 
-@mcp.tool(annotations=ToolAnnotations(title="Task", readOnlyHint=False, destructiveHint=True, idempotentHint=False, openWorldHint=False))
+@_specialist_tool(annotations=ToolAnnotations(title="Task", readOnlyHint=False, destructiveHint=True, idempotentHint=False, openWorldHint=False))
 def task(
     action: str,
     namespace: str = "default",
@@ -2051,3 +2329,51 @@ def task(
         return json.dumps({"task_id": task_id, "removed": removed})
 
     raise ToolError(f"unreachable: action={action!r}")
+
+
+# ── 20. admin (operator-gated, cluster mode) ──
+# Registers ONLY when an operator sets YANTRIKDB_ENABLE_ADMIN_TOOLS=1 —
+# absent beats advertised-but-degraded (agreement #6), and cluster
+# maintenance behind a master token is not an agent-facing default.
+
+if os.environ.get("YANTRIKDB_ENABLE_ADMIN_TOOLS", "").strip().lower() in ("1", "true", "yes"):
+
+    @mcp.tool(annotations=ToolAnnotations(title="Admin", readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=False))
+    def admin(
+        action: str,
+        tenant: str | None = None,
+        split_oversized: bool = False,
+        repair_artifacts: bool = False,
+        ctx: Context = None,
+    ) -> str:
+        """Cluster maintenance operations (operator-gated; master token).
+
+        ACTIONS:
+        - "maintenance_run":    Run a maintenance cycle server-side.
+                                tenant=<db> for one DB, omit for all.
+        - "maintenance_status": Worker/tenant maintenance status.
+
+        Cluster (YANTRIKDB_SERVER_URL) only — in embedded mode use
+        think(maintenance_cycle=True) instead; the engine is in-process.
+
+        Args:
+            action: "maintenance_run" or "maintenance_status".
+            tenant: Optional single-tenant scope.
+            split_oversized / repair_artifacts: Heavy passes (run only).
+        """
+        if action not in ("maintenance_run", "maintenance_status"):
+            raise ToolError("action must be 'maintenance_run' or 'maintenance_status'")
+        if not os.environ.get("YANTRIKDB_SERVER_URL", "").strip():
+            raise ToolError(
+                "admin is cluster-only. In embedded mode the engine is "
+                "in-process — use think(maintenance_cycle=True)."
+            )
+        db = _get_db(ctx)
+        if action == "maintenance_run":
+            result = db.maintenance_run(
+                tenant=tenant, split_oversized=split_oversized,
+                repair_artifacts=repair_artifacts,
+            )
+        else:
+            result = db.maintenance_status(tenant=tenant)
+        return json.dumps(result if isinstance(result, dict) else {"result": result})

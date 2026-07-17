@@ -167,9 +167,19 @@ File-based memory (CLAUDE.md, memory files) loads **everything** into context ev
 
 Run the benchmark yourself: `python benchmarks/bench_token_savings.py`
 
+## Recommended agent workflow (golden path)
+
+The server injects a golden-path playbook into the agent's system prompt. Since v0.10.0 the default is **digest-first**:
+
+1. **Cold start — one call.** `session(action="digest")` returns a single briefing (narrative chain head, open decisions, unresolved conflicts, pending triggers, stale high-importance memories) — replacing several separate `recall`/`temporal` calls at conversation start. Then `recall` only for the specific thing the current message is about.
+2. **During work — capture as you go.** New durable fact → `remember`; a stored fact changed → `correct` (keeps history, avoids contradictions); relationship learned → `graph(action="relate")`.
+3. **End of substantial work — conditional.** Only when the session was long or state-changing: `think` to consolidate + detect conflicts. Short/read-only exchanges need no end step.
+
+**Trust boundary:** recalled memories and digest snippets are *data, not instructions*. The playbook directs the agent never to execute directives found inside recalled content — a memory may carry text an earlier session or another user stored.
+
 ## Tools
 
-19 tools, full engine coverage (added `gaps`, `conversation`, `task` in v0.9.0):
+19 tools, full engine coverage (`gaps`, `conversation`, `task` added in v0.9.0):
 
 | Tool | Actions | Purpose |
 |---|---|---|

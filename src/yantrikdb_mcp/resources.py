@@ -38,7 +38,10 @@ def health_resource(ctx: Context = None) -> str:
     stats = db.stats()
     return json.dumps({
         "status": "ok",
-        "active_memories": stats.get("active", 0),
+        # Engine key is `active_memories` (both embedded dict and the HTTP
+        # _Stats wrapper) — reading "active" here silently reported 0
+        # memories on every healthy server.
+        "active_memories": stats.get("active_memories", 0),
         "total_entities": stats.get("entities", 0),
         "total_edges": stats.get("edges", 0),
     }, indent=2)
