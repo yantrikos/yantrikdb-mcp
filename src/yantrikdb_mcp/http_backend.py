@@ -126,11 +126,49 @@ class HttpBackend:
                     raise
         return {}
 
+    def _get_optional(self, path: str, params: dict | None = None,
+                      retries: int = 2) -> dict | None:
+        """GET where a 404 is an EXPECTED empty result, not an error.
+
+        Used by chain-head / current-value style endpoints where "no such
+        thing yet" is a normal branch the caller handles, returning None
+        instead of raising `requests.HTTPError`. All other non-2xx statuses
+        (and 503-driven leader rediscovery) behave exactly like `_get`.
+        """
+        for attempt in range(retries + 1):
+            try:
+                r = self._session.get(self._url(path), params=params, timeout=self._timeout)
+                if r.status_code == 503:
+                    self._leader = None
+                    self._find_leader()
+                    continue
+                if r.status_code == 404:
+                    return None
+                r.raise_for_status()
+                return r.json()
+            except requests.exceptions.ConnectionError:
+                self._leader = None
+                self._find_leader()
+                if attempt == retries:
+                    raise
+        return {}
+
     # ── methods called by tools.py ──────────────────────────────────
 
     def record(self, text: str, *, memory_type="semantic", importance=0.5,
                valence=0.0, metadata=None, namespace="default", certainty=0.8,
-               domain="general", source="user", emotional_state=None, **_kw) -> str:
+               domain="general", source="user", emotional_state=None,
+               idempotency_key=None, **_kw) -> str:
+        # Honest surface (ecosystem agreement #6): the HTTP gateway hasn't
+        # wired idempotency keys yet — forwarding one would be silently
+        # dropped server-side, which is worse than refusing. Raise so the
+        # tool layer's translator names the limitation to the agent.
+        if idempotency_key:
+            raise ValueError(
+                "idempotency_key is not supported over the HTTP cluster "
+                "backend yet (/v1/remember has no key field); retry without "
+                "the key or use embedded mode for exactly-once writes"
+            )
         body = {
             "text": text,
             "memory_type": memory_type,
@@ -180,6 +218,43 @@ class HttpBackend:
             ),
             "hints": result.get("hints", []),
         }
+
+    def recall(self, *, query: str, top_k: int = 10, memory_type=None,
+               include_consolidated=False, expand_entities=True,
+               namespace=None, domain=None, source=None,
+               include_superseded: bool = False, **_kw) -> list:
+        """Row-level recall (embedded `db.recall` parity) — used by the
+        tool layer's include_superseded archaeology path. Forwards
+        include_superseded to /v1/recall (yantrikdb-server wires the param
+        in its v0.10 leg; older servers ignore it, which the tool layer
+        surfaces via the why_retrieved/superseded_by fields being absent
+        rather than silently — the row shape itself is identical)."""
+        body: dict = {"query": query, "top_k": top_k}
+        if memory_type:
+            body["memory_type"] = memory_type
+        if namespace:
+            body["namespace"] = namespace
+        if domain:
+            body["domain"] = domain
+        if source:
+            body["source"] = source
+        if include_superseded:
+            body["include_superseded"] = True
+        result = self._post("/v1/recall", body)
+        rows = []
+        for r in result.get("results", []):
+            rows.append({
+                "rid": r.get("rid", ""),
+                "text": r.get("text", ""),
+                "type": r.get("memory_type", "semantic"),
+                "score": r.get("score", 0.0),
+                "importance": r.get("importance", 0.5),
+                "created_at": r.get("created_at", 0),
+                "why_retrieved": r.get("why_retrieved", []),
+                "superseded_by": r.get("superseded_by"),
+                "disputed_with": r.get("disputed_with", []),
+            })
+        return rows
 
     def forget(self, rid: str) -> bool:
         result = self._post("/v1/forget", {"rid": rid})
@@ -488,18 +563,50 @@ class HttpBackend:
     # clear RemoteUnsupportedError instead of AttributeError, with a
     # pointer to the embedded fallback or the relevant tracking issue.
 
-    def session_digest(self, *args, **kw) -> dict:
-        raise self._not_supported(
-            "session_digest",
-            hint="v0.9.0 boot briefing isn't exposed over HTTP yet; embedded "
-                 "mode has db.session_digest() now.",
-        )
+    def session_digest(self, *, narrative_namespace=None, scope=None,
+                       include_gaps=False, max_gaps=5, max_decisions=8,
+                       max_conflicts=5, max_triggers=5, snippet_chars=240,
+                       **_kw) -> dict:
+        """Boot-time briefing — GET /v1/session/digest (server v0.8.27+).
 
-    def knowledge_gaps(self, *args, **kw) -> list:
-        raise self._not_supported(
-            "knowledge_gaps",
-            hint="v0.9.0 demand log isn't exposed over HTTP yet.",
-        )
+        Mirrors the embedded `db.session_digest()` keyword surface. The
+        embedded engine returns a JSON string; the HTTP gateway returns a
+        first-class JSON object, so the tool layer's `isinstance(digest, str)`
+        decode is a no-op on this path — both backends land the agent on a
+        dict either way.
+        """
+        params: dict = {
+            "max_decisions": max_decisions,
+            "max_conflicts": max_conflicts,
+            "max_triggers": max_triggers,
+            "snippet_chars": snippet_chars,
+        }
+        if narrative_namespace:
+            params["namespace"] = narrative_namespace
+        if scope:
+            params["scope"] = scope
+        if include_gaps:
+            params["include_gaps"] = "true"
+            params["max_gaps"] = max_gaps
+        return self._get("/v1/session/digest", params=params)
+
+    def knowledge_gaps(self, *, min_count=2, max_avg_top_score=0.5,
+                       limit=10, namespace=None, **_kw) -> list:
+        """Known-unknowns — GET /v1/insights/gaps (server v0.8.27+).
+
+        Returns the `gaps` list to match the embedded `db.knowledge_gaps()`
+        shape the tool layer expects (it wraps the list in `{count, gaps}`
+        itself). Server defaults (min_count=2, max_avg_top_score=0.5,
+        limit=10) are mirrored here."""
+        params: dict = {
+            "min_count": min_count,
+            "max_avg_top_score": max_avg_top_score,
+            "limit": limit,
+        }
+        if namespace:
+            params["namespace"] = namespace
+        result = self._get("/v1/insights/gaps", params=params)
+        return result.get("gaps", [])
 
     def record_turn(self, *args, **kw):
         raise self._not_supported("record_turn",
@@ -551,8 +658,22 @@ class HttpBackend:
     def auto_resolve_conflicts(self, *args, **kw) -> dict:
         raise self._not_supported("auto_resolve_conflicts")
 
-    def chain_head(self, *args, **kw):
-        raise self._not_supported("chain_head")
+    def chain_head(self, namespace: str, *_args, **_kw):
+        """Current value of a revision chain — GET /v1/current?namespace=.
+
+        This is the supersession-aware "what is the latest X" query that
+        similarity search cannot answer at any k (measured RAG 0.00 vs
+        substrate 0.78-1.00). Returns the head record as a plain dict to
+        match the embedded `db.chain_head()` shape, or None for an
+        empty/unknown chain (the server's 404 — an EXPECTED branch the tool
+        layer renders as "no chain head", not an error).
+        """
+        if not namespace or not str(namespace).strip():
+            raise ValueError("namespace required for chain_head")
+        result = self._get_optional("/v1/current", params={"namespace": namespace})
+        if not result or not result.get("found"):
+            return None
+        return result.get("record")
 
     def history(self, *args, **kw) -> list:
         raise self._not_supported("history")
@@ -584,11 +705,42 @@ class HttpBackend:
                  "tools.py falls back to a per-item loop transparently.",
         )
 
-    def draft_memories_from_summary(self, *args, **kw) -> dict:
-        raise self._not_supported(
-            "draft_memories_from_summary",
-            hint="End-of-session auto-capture is embedded-only today.",
-        )
+    def draft_memories_from_summary(self, summary: str, *, namespace="default",
+                                    domain="general", **_kw) -> dict:
+        """End-of-session capture — POST /v1/session/end (server v0.8.27+).
+
+        Distinct from the tracking-end (DELETE /v1/sessions/{id}, see
+        `session_end`): this segments a summary STRING into atomic candidate
+        facts, no session_id involved. Server ruling 2026-07-17 — the two
+        operations share the phrase "session end" but must never converge.
+        Returns {"drafted": [rid...], "count": N}."""
+        body: dict = {"summary": summary}
+        if namespace:
+            body["namespace"] = namespace
+        if domain:
+            body["domain"] = domain
+        return self._post("/v1/session/end", body)
+
+    # ── operator/admin surface (MASTER token, server v0.8.27+) ──────
+
+    def maintenance_run(self, *, tenant=None, split_oversized=False,
+                        repair_artifacts=False, **_kw) -> dict:
+        """POST /v1/admin/maintenance/run — master-token only. ?tenant runs
+        one DB, omitted = all. 409 on a non-write-accepting node."""
+        path = "/v1/admin/maintenance/run"
+        if tenant:
+            path += f"?tenant={tenant}"
+        body: dict = {}
+        if split_oversized:
+            body["split_oversized"] = True
+        if repair_artifacts:
+            body["repair_artifacts"] = True
+        return self._post(path, body)
+
+    def maintenance_status(self, *, tenant=None, **_kw) -> dict:
+        """GET /v1/admin/maintenance/status — master-token only."""
+        params = {"tenant": tenant} if tenant else None
+        return self._get("/v1/admin/maintenance/status", params=params)
 
     def close(self):
         self._session.close()

@@ -376,7 +376,18 @@ def test_correct_tool_accepts_reason_and_works_e2e(mcp_proc):
     v0.9.1 the MCP `correct` tool passed `correction_note=` and blew up
     with `unexpected keyword argument 'correction_note'` for every user
     on engine >=0.7.20. This test would have caught it: create a
-    memory, then correct it via the tool, then assert the result shape."""
+    memory, then correct it via the tool, then assert the result shape.
+
+    NOTE: this asserts the SIGNATURE contract (reason required, no
+    correction_note, in-place corrected_rid) via an importance correction,
+    which is engine-stable across every version we pin. It deliberately
+    does NOT correct via `new_text`, because the engine's new_text policy
+    is version-dependent — released 0.9.4 REFUSES a text change (it would
+    leave the memory retrieved under its old vector), while the v0.10
+    engine re-embeds in place and accepts it. That 422→200 transition is a
+    behavioral-contract case gated on the v0.10 engine pin (see the v0.10
+    contract suite), not a signature regression, so coupling this test to
+    it would make a signature guard fail on a text-mutation policy change."""
     # 1) Record a memory to correct
     is_err, body = _unwrap(_call_tool(
         mcp_proc, "remember", 200,
@@ -386,17 +397,19 @@ def test_correct_tool_accepts_reason_and_works_e2e(mcp_proc):
     assert not is_err, f"seed remember failed: {body}"
     seed_rid = body["rid"]
 
-    # 2) Correct with the new-signature args (reason required)
+    # 2) Correct with the new-signature args (reason required). Use an
+    #    importance correction — exercises the exact v0.9.1 forwarding fix
+    #    (reason=, no correction_note=) without depending on new_text policy.
     is_err, body = _unwrap(_call_tool(
         mcp_proc, "correct", 201,
         rid=seed_rid,
-        reason="Switched from 3.11 to 3.12 after adopting new deps",
-        new_text="Python 3.12 is the target for the build.",
+        reason="Raised importance after 3.12 adoption became load-bearing",
+        new_importance=0.9,
     ))
     assert not is_err, f"correct failed: {body}"
     # Engine v0.7.20+ mutates in-place; the response includes corrected_rid
     assert body.get("corrected_rid") is not None
-    assert body.get("reason", "").startswith("Switched")
+    assert body.get("reason", "").startswith("Raised importance")
 
 
 def test_correct_tool_reason_is_required(mcp_proc):

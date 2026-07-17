@@ -36,6 +36,8 @@ def main():
         print()
         print("Environment variables:")
         print("  YANTRIKDB_DB_PATH          Database file path (default: ~/.yantrikdb/memory.db)")
+        print("  YANTRIKDB_TOOL_PROFILE     Advertised tool set: full (all 19) | core (10 golden-path, ~36% smaller schema)")
+        print("  YANTRIKDB_EMBEDDER         Embedder backend: auto|bundled|onnx|multilingual (default: auto)")
         print("  YANTRIKDB_EMBEDDING_MODEL  Sentence transformer model (default: all-MiniLM-L6-v2)")
         print("  YANTRIKDB_EMBEDDING_DIM    Embedding dimension (default: 384)")
         print("  YANTRIKDB_API_KEY          Bearer token for SSE/HTTP auth (required for network transports)")

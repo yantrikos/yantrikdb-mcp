@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "yantrikdb-mcp"
-version = "0.9.1"
+version = "0.10.0"
 description = "YantrikDB — Cognitive memory for AI agents. Persistent semantic recall, knowledge graph, contradiction detection, and procedural learning. Ships as embeddable engine, network database, or MCP server."
 readme = "README.md"
 license = "MIT"
@@ -46,7 +46,18 @@ dependencies = [
     #   - v0.7.16: v26 schema migration foundation (additive, replay-safe).
     #   - v0.7.17: db.reembed() — atomic engine-side embedder migration.
     #     Not exposed as an MCP tool in v0.8.x; surfaces in a later version.
-    "yantrikdb>=0.9.0",
+    # D3 compatibility firewall: bound to the tested minor line.
+    # `>=0.9.0` alone admitted any future breaking release (which is exactly
+    # how v0.9.0/v0.9.1 shipped broken against engine signature drift — see
+    # the correct()/set_embedder_named regressions). The range widens only
+    # after a new engine minor is added to CI and contract-tested.
+    # v0.10.0 (engine tag 9bbcd8e, cross-validated on the release train):
+    # typed exceptions, record(idempotency_key=), recall excludes superseded
+    # by default, correct(new_text) re-embeds in place (was refused),
+    # record_text/record_batch ns-normalization. The PIN IS A BACKSTOP —
+    # the behavioral gates are tests/test_v010_engine_contract_cases.py
+    # (feature-probed) + tests/test_mcp_semantic_contract.py.
+    "yantrikdb>=0.10.0,<0.11.0",
     "mcp[cli]>=1.2.0",
     "click>=8.0.0",
     "requests>=2.28.0",
