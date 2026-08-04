@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "yantrikdb-mcp"
-version = "0.10.0"
+version = "0.10.1"
 description = "YantrikDB — Cognitive memory for AI agents. Persistent semantic recall, knowledge graph, contradiction detection, and procedural learning. Ships as embeddable engine, network database, or MCP server."
 readme = "README.md"
 license = "MIT"
@@ -58,7 +58,21 @@ dependencies = [
     # the behavioral gates are tests/test_v010_engine_contract_cases.py
     # (feature-probed) + tests/test_mcp_semantic_contract.py.
     "yantrikdb>=0.10.0,<0.11.0",
-    "mcp[cli]>=1.2.0",
+    # v0.10.1 HOTFIX. This pin was `mcp[cli]>=1.2.0` — unbounded — so when the
+    # SDK shipped 2.0.0 (which REMOVED `mcp.server.fastmcp`), every fresh
+    # install of the ALREADY-PUBLISHED v0.10.0 resolved to it and produced a
+    # server that dies on import:
+    #     ModuleNotFoundError: No module named 'mcp.server.fastmcp'
+    # Nothing in this release changed; upstream cut a major and v0.10.0
+    # re-shipped itself broken. An unbounded pin on a hard runtime dependency
+    # is a release that silently re-breaks itself every time upstream does that.
+    #
+    # This line is bounded at <2.0.0 and STAYS there: the 0.10.x tree has no
+    # `_compat` layer, so it genuinely cannot run on 2.x. Support for the 2.x
+    # import surface landed in v0.12.0 — upgrade there to run on either line.
+    # Verified before bounding: mcp 1.29.0 (top of 1.x) still exports FastMCP,
+    # ToolError, and ToolAnnotations.
+    "mcp[cli]>=1.2.0,<2.0.0",
     "click>=8.0.0",
     "requests>=2.28.0",
 ]
