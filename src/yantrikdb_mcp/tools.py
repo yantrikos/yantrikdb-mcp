@@ -2331,7 +2331,243 @@ def task(
     raise ToolError(f"unreachable: action={action!r}")
 
 
-# ── 20. admin (operator-gated, cluster mode) ──
+# ── 20. pack (v0.11.0 — signed portable memory bundles) ──
+# Registers ONLY when the ENGINE actually carries the pack substrate
+# (feature probe, not a version parse — same gating rule as the contract
+# suites). On a v0.10 engine the tool is simply absent rather than present
+# and failing on every call: absent beats advertised-but-degraded
+# (agreement #6). Specialist-tier, so `core` profile stays lean.
+#
+# Read actions (list/inspect/publishers) are always safe. WRITE actions
+# (install/uninstall/mount/unmount/trust/untrust) mutate what the agent
+# will recall as fact and are gated behind YANTRIKDB_ENABLE_PACK_WRITES=1:
+# importing a third party's memories into a user's substrate is an
+# operator decision, not an agent-initiated one.
+
+_PACK_WRITES = os.environ.get("YANTRIKDB_ENABLE_PACK_WRITES", "").strip().lower() in (
+    "1", "true", "yes",
+)
+_PACK_READ_ACTIONS = ("list", "inspect", "publishers", "embedder_identity")
+_PACK_WRITE_ACTIONS = (
+    "install", "uninstall", "mount", "unmount", "unmount_all", "trust", "untrust",
+)
+
+
+def _pack_engine_supported() -> bool:
+    """True when the loaded engine exposes the v0.11 pack surface."""
+    try:
+        from yantrikdb import YantrikDB
+    except ImportError:  # pragma: no cover - engine always present in practice
+        return False
+    return hasattr(YantrikDB, "install_pack") and hasattr(YantrikDB, "mounted_packs")
+
+
+def _translate_pack_error(e: Exception, path_or_id: str) -> str | None:
+    """Translate v0.11 typed pack failures into agent-actionable MCP errors.
+
+    Branch on TYPE (never message regex), same discipline as
+    _translate_idempotency_error. Returns None when the exception isn't
+    pack-related so the caller re-raises unchanged."""
+    import yantrikdb
+
+    mismatch = getattr(yantrikdb, "PackEmbedderMismatch", None)
+    already = getattr(yantrikdb, "PackAlreadyMounted", None)
+    badsig = getattr(yantrikdb, "PackSignatureInvalid", None)
+
+    if mismatch is not None and isinstance(e, mismatch):
+        # The engine's own message is unusually good here (it explains the
+        # shared-query-encoding failure mode) — pass it through, then name
+        # the fix rather than restating the symptom.
+        return _err(
+            f"pack embedder mismatch for {path_or_id!r}: {e} "
+            f"FIX: re-seal the pack on a host running this database's embedder "
+            f"(see pack(action='embedder_identity')), or ask the publisher for a "
+            f"build matching it. Mounting across embedding spaces returns "
+            f"plausible-looking but meaningless recalls.",
+            pack=path_or_id,
+        )
+    if already is not None and isinstance(e, already):
+        return _err(
+            f"pack {path_or_id!r} is already mounted — nothing to do. "
+            f"Use pack(action='list') to see what is mounted, or "
+            f"pack(action='unmount', pack_id=...) first to re-mount from a "
+            f"different file.",
+            pack=path_or_id,
+        )
+    if badsig is not None and isinstance(e, badsig):
+        return _err(
+            f"pack signature invalid for {path_or_id!r}: {e}. The file does not "
+            f"match the signature its publisher claims — treat it as tampered "
+            f"or truncated and re-download from the publisher.",
+            pack=path_or_id,
+        )
+    return None
+
+
+if _pack_engine_supported():
+
+    @_specialist_tool(annotations=ToolAnnotations(title="Pack", readOnlyHint=False, destructiveHint=True, idempotentHint=False, openWorldHint=False))
+    def pack(
+        action: str,
+        path: str | None = None,
+        pack_id: str | None = None,
+        pubkey: str | None = None,
+        label: str | None = None,
+        allow_unverified_embedder: bool = False,
+        ctx: Context = None,
+    ) -> str:
+        """Signed, portable memory bundles — inspect, install, and trust packs.
+
+        A pack is a sealed corpus another agent or vendor published. Mounted
+        pack memories are recallable alongside your own but are DOWN-WEIGHTED
+        (tier_multiplier < 1.0): what the user told you locally always
+        outranks imported knowledge.
+
+        READ ACTIONS (always available):
+        - "list":        Installed + mounted packs (id, name, origin, trust, rows).
+        - "inspect":     Read a pack file's manifest WITHOUT installing it.
+                         path=<file>. Shows origin, signature, embedder, rows —
+                         always inspect before you install.
+        - "publishers":  Public keys this database trusts.
+        - "embedder_identity": This database's embedding fingerprint. A pack
+                         must be sealed against a matching space to mount.
+
+        WRITE ACTIONS (operator-gated; set YANTRIKDB_ENABLE_PACK_WRITES=1):
+        - "install":     Install + mount a pack. path=<file>.
+        - "uninstall":   Remove a pack and its rows. pack_id=<id>.
+        - "mount"/"unmount"/"unmount_all": Session-scoped mount control.
+        - "trust":       Trust a publisher key. pubkey=<hex>, label=<name>.
+        - "untrust":     Revoke a publisher key. pubkey=<hex>.
+
+        Args:
+            action: One of the read/write actions above.
+            path: Pack file path (inspect / install / mount).
+            pack_id: Pack identifier, e.g. "origin@1.0.0" (uninstall / unmount).
+            pubkey: Publisher public key hex (trust / untrust).
+            label: Human label for a trusted publisher (trust).
+            allow_unverified_embedder: Mount despite an unverified embedder.
+                Does NOT override a hard dimension mismatch.
+        """
+        valid = _PACK_READ_ACTIONS + _PACK_WRITE_ACTIONS
+        if action not in valid:
+            raise ToolError(f"action must be one of {', '.join(valid)}")
+        if action in _PACK_WRITE_ACTIONS and not _PACK_WRITES:
+            raise ToolError(
+                f"pack action {action!r} is disabled on this server. Installing "
+                f"or trusting a pack imports third-party memories into the "
+                f"user's substrate — an operator decision. Enable with "
+                f"YANTRIKDB_ENABLE_PACK_WRITES=1. Read actions "
+                f"({', '.join(_PACK_READ_ACTIONS)}) remain available."
+            )
+
+        db = _get_db(ctx)
+        target = path or pack_id or pubkey or ""
+
+        try:
+            if action == "list":
+                return json.dumps({
+                    "installed": db.installed_packs(),
+                    "mounted": db.mounted_packs(),
+                })
+
+            if action == "inspect":
+                if not path:
+                    raise ToolError("path required for action='inspect'")
+                man = db.read_pack_manifest(path)
+                if not man:
+                    return _err(f"no readable pack manifest at {path!r}")
+                # Surface the trust posture explicitly: an unsigned pack is
+                # installable but carries no publisher guarantee, and the
+                # agent must be able to say so before recommending install.
+                man = dict(man)
+                man["trust_note"] = (
+                    "signed by publisher — verify the key via "
+                    "pack(action='publishers')"
+                    if man.get("signed")
+                    else "UNSIGNED — no publisher guarantee; provenance rests "
+                         "entirely on where you obtained this file"
+                )
+                return json.dumps(man, default=str)
+
+            if action == "publishers":
+                return json.dumps({"trusted_publishers": db.trusted_publishers()})
+
+            if action == "embedder_identity":
+                ident = db.embedder_identity()
+                if ident is None:
+                    return json.dumps({
+                        "embedder_identity": None,
+                        "note": "not yet adopted — this database has not embedded "
+                                "anything. It adopts on first write.",
+                    })
+                return json.dumps({"embedder_identity": ident})
+
+            if action == "install":
+                if not path:
+                    raise ToolError("path required for action='install'")
+                installed_id = db.install_pack(path)
+                mounted = [m for m in db.mounted_packs() if m.get("pack_id") == installed_id]
+                return json.dumps({
+                    "installed": installed_id,
+                    "mounted": mounted[0] if mounted else None,
+                })
+
+            if action == "uninstall":
+                if not pack_id:
+                    raise ToolError("pack_id required for action='uninstall'")
+                before = (db.stats() or {}).get("active_memories")
+                removed = db.uninstall_pack(pack_id)
+                after = (db.stats() or {}).get("active_memories")
+                # Zero-residue is the trust property: report it, don't assume it.
+                return json.dumps({
+                    "pack_id": pack_id,
+                    "removed": removed,
+                    "active_memories_before": before,
+                    "active_memories_after": after,
+                })
+
+            if action == "mount":
+                if not path:
+                    raise ToolError("path required for action='mount'")
+                db.mount_pack(path, allow_unverified_embedder=allow_unverified_embedder)
+                return json.dumps({"mounted": db.mounted_packs()})
+
+            if action == "unmount":
+                if not pack_id:
+                    raise ToolError("pack_id required for action='unmount'")
+                db.unmount_pack(pack_id)
+                return json.dumps({"unmounted": pack_id, "mounted": db.mounted_packs()})
+
+            if action == "unmount_all":
+                db.unmount_all_packs()
+                return json.dumps({"unmounted_all": True, "mounted": db.mounted_packs()})
+
+            if action == "trust":
+                if not pubkey:
+                    raise ToolError("pubkey required for action='trust'")
+                db.trust_publisher(pubkey, label=label)
+                return json.dumps({"trusted": pubkey, "label": label,
+                                   "trusted_publishers": db.trusted_publishers()})
+
+            if action == "untrust":
+                if not pubkey:
+                    raise ToolError("pubkey required for action='untrust'")
+                db.untrust_publisher(pubkey)
+                return json.dumps({"untrusted": pubkey,
+                                   "trusted_publishers": db.trusted_publishers()})
+
+        except ToolError:
+            raise
+        except Exception as e:  # typed pack errors -> actionable MCP errors
+            translated = _translate_pack_error(e, target)
+            if translated is not None:
+                return translated
+            raise
+
+        raise ToolError(f"unreachable: action={action!r}")
+
+
+# ── 21. admin (operator-gated, cluster mode) ──
 # Registers ONLY when an operator sets YANTRIKDB_ENABLE_ADMIN_TOOLS=1 —
 # absent beats advertised-but-degraded (agreement #6), and cluster
 # maintenance behind a master token is not an agent-facing default.

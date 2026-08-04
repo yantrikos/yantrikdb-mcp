@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "yantrikdb-mcp"
-version = "0.10.0"
+version = "0.11.0"
 description = "YantrikDB — Cognitive memory for AI agents. Persistent semantic recall, knowledge graph, contradiction detection, and procedural learning. Ships as embeddable engine, network database, or MCP server."
 readme = "README.md"
 license = "MIT"
@@ -54,10 +54,19 @@ dependencies = [
     # v0.10.0 (engine tag 9bbcd8e, cross-validated on the release train):
     # typed exceptions, record(idempotency_key=), recall excludes superseded
     # by default, correct(new_text) re-embeds in place (was refused),
-    # record_text/record_batch ns-normalization. The PIN IS A BACKSTOP —
-    # the behavioral gates are tests/test_v010_engine_contract_cases.py
-    # (feature-probed) + tests/test_mcp_semantic_contract.py.
-    "yantrikdb>=0.10.0,<0.11.0",
+    # record_text/record_batch ns-normalization.
+    # v0.11.x (PyPI 0.11.3, cross-validated): the PACK substrate — signed,
+    # portable memory bundles. Adds install/mount/uninstall_pack, seal/
+    # sign_pack, read_pack_manifest, trust_publisher family, embedder_identity/
+    # adopt_embedder_identity, and three typed errors (PackAlreadyMounted,
+    # PackEmbedderMismatch, PackSignatureInvalid). Purely ADDITIVE over 0.10 —
+    # the full v0.10 gate stays green on 0.11.3 (verified before widening).
+    # The range widens to <0.12.0 ONLY because 0.11 is now feature-probed by
+    # tests/test_v011_engine_contract_cases.py.
+    # The PIN IS A BACKSTOP — the behavioral gates are the feature-probed
+    # contract suites (test_v010_/test_v011_engine_contract_cases.py) +
+    # tests/test_mcp_semantic_contract.py.
+    "yantrikdb>=0.10.0,<0.12.0",
     "mcp[cli]>=1.2.0",
     "click>=8.0.0",
     "requests>=2.28.0",

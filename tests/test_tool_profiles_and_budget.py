@@ -18,6 +18,17 @@ import sys
 
 import pytest
 
+def _engine_has_packs() -> bool:
+    """Feature probe (never a version parse) — mirrors tools._pack_engine_supported."""
+    try:
+        from yantrikdb import YantrikDB
+    except ImportError:
+        return False
+    return hasattr(YantrikDB, "install_pack") and hasattr(YantrikDB, "mounted_packs")
+
+
+_ENGINE_HAS_PACKS = _engine_has_packs()
+
 CORE_TOOLS = {
     "remember", "recall", "correct", "forget", "session",
     "memory", "think", "graph", "conflict", "procedure",
@@ -25,6 +36,10 @@ CORE_TOOLS = {
 FULL_TOOLS = CORE_TOOLS | {
     "temporal", "category", "personality", "trigger", "stats",
     "conversation", "task", "gaps", "skill",
+    # v0.11.0: registers only when the ENGINE carries the pack substrate
+    # (feature-probed). Guarded below so this suite stays green on a v0.10
+    # engine, where the tool is deliberately absent rather than broken.
+    *(("pack",) if _ENGINE_HAS_PACKS else ()),
 }
 
 # ── budget ───────────────────────────────────────────────────────────
@@ -32,7 +47,15 @@ FULL_TOOLS = CORE_TOOLS | {
 # Baseline set 2026-07-17 on the v0.10.0 branch after the capability-
 # activation guidance (chain_head / why_retrieved / include_gaps) and the
 # v0.10 args (idempotency_key, include_superseded, capture) landed.
-SCHEMA_BUDGET_CHARS = 43_000
+#
+# 43_000 -> 45_500 on the v0.11.0 branch (REVIEWED): the `pack` tool adds
+# 2,317 chars of schema for the engine's new signed-memory-bundle substrate
+# — 9 actions whose docstring has to carry the trust model (down-weighted
+# ranking, inspect-before-install, signature posture) because a mis-trusted
+# pack silently rewrites what the agent believes. The headroom above the
+# measured 43,289 is deliberately small so the NEXT addition also has to be
+# argued for. `core` profile is unaffected — pack is specialist-tier.
+SCHEMA_BUDGET_CHARS = 45_500
 
 
 def _rpc(proc, method, params, mid):

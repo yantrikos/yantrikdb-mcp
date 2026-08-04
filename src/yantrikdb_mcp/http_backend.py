@@ -742,6 +742,66 @@ class HttpBackend:
         params = {"tenant": tenant} if tenant else None
         return self._get("/v1/admin/maintenance/status", params=params)
 
+    # ── v0.11.0 pack substrate — refused, not stubbed-silent ────────
+    # Packs are LOCAL-FILE operations: sealing, signing, and mounting all
+    # act on a file path on the machine running the engine. In cluster
+    # mode the engine is on the server, so a path the agent can see is
+    # NOT a path the engine can open — forwarding one would either fail
+    # obscurely or, worse, mount whatever unrelated file sits at that
+    # path server-side. These refuse loudly and name the fix (agreement
+    # #6: never silently degrade). Publisher-trust and embedder-identity
+    # are engine-state, so they become real calls the day the server
+    # exposes /v1/packs/*; until then they refuse for the same reason.
+
+    def _pack_unsupported(self, method: str):
+        return self._not_supported(
+            method,
+            "Packs are local-file operations and the engine runs on the "
+            "cluster in remote mode — a client-side path is not resolvable "
+            "server-side. Manage packs from an embedded-mode server "
+            "(unset YANTRIKDB_SERVER_URL) that owns the pack files.",
+        )
+
+    def install_pack(self, *args, **kw):
+        raise self._pack_unsupported("install_pack")
+
+    def uninstall_pack(self, *args, **kw):
+        raise self._pack_unsupported("uninstall_pack")
+
+    def mount_pack(self, *args, **kw):
+        raise self._pack_unsupported("mount_pack")
+
+    def unmount_pack(self, *args, **kw):
+        raise self._pack_unsupported("unmount_pack")
+
+    def unmount_all_packs(self, *args, **kw):
+        raise self._pack_unsupported("unmount_all_packs")
+
+    def installed_packs(self, *args, **kw) -> list:
+        raise self._pack_unsupported("installed_packs")
+
+    def mounted_packs(self, *args, **kw) -> list:
+        raise self._pack_unsupported("mounted_packs")
+
+    def read_pack_manifest(self, *args, **kw) -> dict:
+        raise self._pack_unsupported("read_pack_manifest")
+
+    def trust_publisher(self, *args, **kw):
+        raise self._pack_unsupported("trust_publisher")
+
+    def untrust_publisher(self, *args, **kw):
+        raise self._pack_unsupported("untrust_publisher")
+
+    def trusted_publishers(self, *args, **kw) -> list:
+        raise self._pack_unsupported("trusted_publishers")
+
+    def embedder_identity(self, *args, **kw):
+        raise self._not_supported(
+            "embedder_identity",
+            "The cluster owns the embedding space; the client cannot read "
+            "its fingerprint. Query the server's own health/stats surface.",
+        )
+
     def close(self):
         self._session.close()
 
