@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "yantrikdb-mcp"
-version = "0.11.0"
+version = "0.12.0"
 description = "YantrikDB — Cognitive memory for AI agents. Persistent semantic recall, knowledge graph, contradiction detection, and procedural learning. Ships as embeddable engine, network database, or MCP server."
 readme = "README.md"
 license = "MIT"
@@ -77,10 +77,12 @@ dependencies = [
     # broken the published v0.10.0 for new installs — an unbounded pin on a
     # hard runtime dependency is a release that silently re-ships itself
     # every time upstream cuts a major.
-    # Verified before bounding: mcp 1.29.0 (top of the 1.x line) still
-    # exports FastMCP, ToolError, and ToolAnnotations. Widen to 2.x only
-    # after the FastMCP-2 import surface is ported and contract-tested.
-    "mcp[cli]>=1.2.0,<2.0.0",
+    # v0.12.0 WIDENS to <3.0.0: the 2.x import surface is now ported behind
+    # `yantrikdb_mcp._compat`, and BOTH lines are exercised in CI (publish.yml
+    # runs the unit suite against mcp 1.x and mcp 2.x). The ceiling stays —
+    # it moves to the next major only when that major is actually tested,
+    # never speculatively.
+    "mcp[cli]>=1.2.0,<3.0.0",
     "click>=8.0.0",
     "requests>=2.28.0",
 ]

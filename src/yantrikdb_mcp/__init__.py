@@ -20,7 +20,12 @@ def _cli_arg(name):
 def main():
     """Entry point for the yantrikdb-mcp console script."""
     if "--version" in sys.argv or "-V" in sys.argv:
-        print(f"yantrikdb-mcp {__version__}")
+        # Report the SDK line too: this package supports both mcp 1.x and
+        # 2.x, and "which line am I actually on" is the first question in
+        # any import-error bug report.
+        from ._compat import sdk_line
+
+        print(f"yantrikdb-mcp {__version__} ({sdk_line()})")
         sys.exit(0)
 
     if "--help" in sys.argv or "-h" in sys.argv:

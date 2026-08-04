@@ -8,13 +8,21 @@ on:
 
 jobs:
   unit:
-    name: Unit tests
+    name: Unit tests (py${{ matrix.python-version }}, ${{ matrix.mcp-line }})
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         # 3.14 is engine-supported since yantrikdb v0.7.11 — the engine
         # wheel matrix builds against it, so we test against it too.
         python-version: ["3.10", "3.12", "3.14"]
+        # BOTH supported SDK majors. mcp 2.0.0 removed `mcp.server.fastmcp`
+        # and additionally REFUSES Context injection on static resources —
+        # a behavioural divergence, not just a symbol move, and one that only
+        # surfaces by actually running against 2.x. `yantrikdb_mcp._compat`
+        # papers over the symbol moves; this axis is what keeps that support
+        # honest instead of letting it rot into a claim nobody checks.
+        mcp-line: ["mcp1", "mcp2"]
     steps:
       - uses: actions/checkout@v4
 
@@ -28,16 +36,42 @@ jobs:
           python -m pip install -U pip
           pip install -e ".[dev,onnx]"
 
+      # Installed AFTER the package so this pin wins over the range resolved
+      # above. Each leg then asserts it actually got the line it asked for —
+      # a silently-wrong resolve would otherwise make one leg a duplicate of
+      # the other and quietly halve the coverage.
+      - name: Pin MCP SDK line (${{ matrix.mcp-line }})
+        run: |
+          if [ "${{ matrix.mcp-line }}" = "mcp1" ]; then
+            pip install -U "mcp[cli]>=1.2.0,<2.0.0"
+          else
+            pip install -U "mcp[cli]>=2.0.0,<3.0.0"
+          fi
+
+      - name: Verify the intended SDK line is what got installed
+        run: |
+          python - <<'EOF'
+          from yantrikdb_mcp._compat import MCP_MAJOR, sdk_line
+          want = 1 if "${{ matrix.mcp-line }}" == "mcp1" else 2
+          print(f"resolved {sdk_line()} (want major {want})")
+          assert MCP_MAJOR == want, f"expected mcp {want}.x, got {sdk_line()}"
+          EOF
+
       - name: Run unit tests (excluding e2e)
         run: pytest -q --ignore=tests/test_e2e_mcp.py
 
   e2e:
-    name: E2E (${{ matrix.backend }} backend)
+    name: E2E (${{ matrix.backend }} backend, ${{ matrix.mcp-line }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         backend: [bundled, onnx, multilingual]
+        # The e2e suite drives a real server over stdio JSON-RPC, so it is
+        # the only place the SDK's actual wire behaviour (tools/list shape,
+        # resource registration, isError envelopes) is exercised. Both lines
+        # must pass it, not just import successfully.
+        mcp-line: ["mcp1", "mcp2"]
     steps:
       - uses: actions/checkout@v4
 
@@ -67,6 +101,23 @@ jobs:
         run: |
           python -m pip install -U pip
           pip install -e ".[dev]"
+
+      - name: Pin MCP SDK line (${{ matrix.mcp-line }})
+        run: |
+          if [ "${{ matrix.mcp-line }}" = "mcp1" ]; then
+            pip install -U "mcp[cli]>=1.2.0,<2.0.0"
+          else
+            pip install -U "mcp[cli]>=2.0.0,<3.0.0"
+          fi
+
+      - name: Verify the intended SDK line is what got installed
+        run: |
+          python - <<'EOF'
+          from yantrikdb_mcp._compat import MCP_MAJOR, sdk_line
+          want = 1 if "${{ matrix.mcp-line }}" == "mcp1" else 2
+          print(f"resolved {sdk_line()} (want major {want})")
+          assert MCP_MAJOR == want, f"expected mcp {want}.x, got {sdk_line()}"
+          EOF
 
       - name: Pre-cache HuggingFace MiniLM (onnx only)
         if: matrix.backend == 'onnx'

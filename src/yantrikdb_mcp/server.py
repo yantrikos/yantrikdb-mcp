@@ -1,4 +1,9 @@
-"""FastMCP server definition with YantrikDB lifespan context."""
+"""MCP server definition with YantrikDB lifespan context.
+
+Runs on both SDK lines: the server object is `FastMCP` on mcp 1.x and
+`MCPServer` on mcp 2.x, resolved by `._compat`. See that module for the
+verified-equivalent semantics.
+"""
 
 import atexit
 import logging
@@ -9,7 +14,7 @@ import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from mcp.server.fastmcp import FastMCP
+from ._compat import MCPServer
 
 # Configure logging to stderr (stdout is reserved for MCP JSON-RPC)
 logging.basicConfig(stream=sys.stderr, level=logging.INFO, format="%(levelname)s: %(message)s")
@@ -261,7 +266,7 @@ def _get_lazy_singleton() -> "_LazyDB":
 
 
 @asynccontextmanager
-async def lifespan(app: FastMCP):
+async def lifespan(app: MCPServer):
     """Provide a process-singleton YantrikDB context.
 
     Under stdio transport this runs once. Under SSE transport FastMCP
@@ -280,7 +285,7 @@ async def lifespan(app: FastMCP):
         pass
 
 
-mcp = FastMCP("yantrikdb", instructions=INSTRUCTIONS, lifespan=lifespan)
+mcp = MCPServer("yantrikdb", instructions=INSTRUCTIONS, lifespan=lifespan)
 
 # Import tools and resources so they register with the server
 from . import resources as _resources  # noqa: F401, E402
