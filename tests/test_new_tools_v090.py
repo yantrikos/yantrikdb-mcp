@@ -132,8 +132,20 @@ def test_v090_tools_registered(mcp_proc):
     assert "session" in names
     assert "remember" in names
     assert "skill" in names
-    # Total should be 19 (16 in v0.8.x + gaps + conversation + task)
-    assert len(names) == 19, f"expected 19 tools, got {len(names)}: {sorted(names)}"
+    # Total: 19 (16 in v0.8.x + gaps + conversation + task), plus `pack`
+    # on a v0.11+ engine — that tool is feature-probed at registration, so
+    # the expected count depends on the ENGINE, not on this package's
+    # version. Derived rather than hardcoded so the assertion keeps its
+    # teeth on both engine lines.
+    try:
+        from yantrikdb import YantrikDB
+        engine_has_packs = hasattr(YantrikDB, "install_pack")
+    except ImportError:  # pragma: no cover
+        engine_has_packs = False
+    expected = 19 + (1 if engine_has_packs else 0)
+    assert len(names) == expected, (
+        f"expected {expected} tools, got {len(names)}: {sorted(names)}"
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────
