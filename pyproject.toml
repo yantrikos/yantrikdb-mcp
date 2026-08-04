@@ -67,7 +67,20 @@ dependencies = [
     # contract suites (test_v010_/test_v011_engine_contract_cases.py) +
     # tests/test_mcp_semantic_contract.py.
     "yantrikdb>=0.10.0,<0.12.0",
-    "mcp[cli]>=1.2.0",
+    # D3 firewall, same rule as the engine pin above — and for the same
+    # reason, learned the same way. `mcp[cli]>=1.2.0` was UNBOUNDED, so the
+    # day the SDK shipped 2.0.0 it removed `mcp.server.fastmcp` and every
+    # fresh `pip install yantrikdb-mcp` produced a server that dies on
+    # import:
+    #     ModuleNotFoundError: No module named 'mcp.server.fastmcp'
+    # Caught by CI on the v0.11.0 release PR (#18), but it had ALREADY
+    # broken the published v0.10.0 for new installs — an unbounded pin on a
+    # hard runtime dependency is a release that silently re-ships itself
+    # every time upstream cuts a major.
+    # Verified before bounding: mcp 1.29.0 (top of the 1.x line) still
+    # exports FastMCP, ToolError, and ToolAnnotations. Widen to 2.x only
+    # after the FastMCP-2 import surface is ported and contract-tested.
+    "mcp[cli]>=1.2.0,<2.0.0",
     "click>=8.0.0",
     "requests>=2.28.0",
 ]
