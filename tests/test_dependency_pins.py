@@ -69,20 +69,58 @@ def test_runtime_dependency_has_upper_bound(spec: str) -> None:
     )
 
 
-def test_mcp_pin_excludes_the_fastmcp_removal() -> None:
-    """Specifically pin the regression: mcp 2.x removed mcp.server.fastmcp,
-    which server.py imports at module scope."""
+def test_mcp_pin_is_bounded_at_the_next_untested_major() -> None:
+    """v0.11.0 pinned <2.0.0 because 2.x removed `mcp.server.fastmcp`. v0.12.0
+    ports that surface behind `_compat`, so the ceiling moves to <3.0.0 — the
+    next major we have NOT tested. The ceiling moves only when a major is
+    actually exercised in CI, never speculatively."""
     spec = next((d for d in _runtime_deps() if _name_of(d) == "mcp"), None)
     assert spec is not None, "mcp is a hard runtime dependency and must be declared"
-    assert "<2.0.0" in spec.replace(" ", ""), (
-        f"mcp pin {spec!r} must exclude 2.x until the FastMCP-2 import surface "
-        f"is ported and contract-tested — 2.0.0 removed `mcp.server.fastmcp`."
+    assert "<3.0.0" in spec.replace(" ", ""), (
+        f"mcp pin {spec!r} must stop at the first UNTESTED major. Both 1.x and "
+        f"2.x are supported via yantrikdb_mcp._compat and covered in CI; 3.x is "
+        f"not, so it must stay excluded until it is."
     )
 
 
-def test_the_imports_the_server_actually_needs_are_importable() -> None:
+def test_the_symbols_the_server_actually_needs_resolve() -> None:
     """The rejection surface for this whole class of failure: not 'is a version
-    installed' but 'do the symbols server.py imports at module scope exist'."""
-    from mcp.server.fastmcp import FastMCP  # noqa: F401
-    from mcp.server.fastmcp.exceptions import ToolError  # noqa: F401
-    from mcp.types import ToolAnnotations  # noqa: F401
+    installed' but 'do the symbols the server imports at module scope exist'.
+
+    Goes through `_compat`, which is the only place allowed to know which SDK
+    line is installed."""
+    from yantrikdb_mcp._compat import (  # noqa: F401
+        MCP_MAJOR,
+        Context,
+        MCPServer,
+        ToolAnnotations,
+        ToolError,
+    )
+
+    assert MCP_MAJOR in (1, 2), f"unexpected MCP SDK line: {MCP_MAJOR}"
+    assert callable(MCPServer)
+    assert issubclass(ToolError, Exception)
+
+
+def test_no_module_bypasses_the_compat_layer() -> None:
+    """A direct `from mcp.server.fastmcp import ...` anywhere outside _compat
+    silently breaks the other SDK line — and would only be caught on whichever
+    CI leg happens to run it. Enforce the single import site structurally."""
+    src = pathlib.Path(__file__).resolve().parents[1] / "src" / "yantrikdb_mcp"
+    offenders: list[str] = []
+    for py in src.glob("*.py"):
+        if py.name == "_compat.py":
+            continue
+        for i, line in enumerate(py.read_text(encoding="utf-8").splitlines(), 1):
+            stripped = line.strip()
+            if stripped.startswith("#"):
+                continue
+            # mcp.types is stable across both majors; the server/* tree is not.
+            if re.search(r"\bfrom\s+mcp\.server[.\s]|\bimport\s+mcp\.server\b", stripped):
+                offenders.append(f"{py.name}:{i}: {stripped}")
+    assert not offenders, (
+        "these modules import from `mcp.server.*` directly instead of going "
+        "through yantrikdb_mcp._compat — that path moved between SDK majors "
+        "and will break one of the two supported lines:\n  "
+        + "\n  ".join(offenders)
+    )

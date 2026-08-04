@@ -5,9 +5,7 @@ import logging
 import os
 import time
 
-from mcp.server.fastmcp import Context
-from mcp.server.fastmcp.exceptions import ToolError
-from mcp.types import ToolAnnotations
+from ._compat import Context, ToolAnnotations, ToolError
 
 from .server import mcp
 
