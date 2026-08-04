@@ -75,17 +75,13 @@ def _run_network(transport: str):
     host = _cli_arg("--host") or "0.0.0.0"
     port = int(_cli_arg("--port") or "8420")
 
-    mcp.settings.host = host
-    mcp.settings.port = port
-    mcp.settings.transport_security.enable_dns_rebinding_protection = False
-    mcp.settings.transport_security.allowed_hosts = ["*"]
-    mcp.settings.transport_security.allowed_origins = ["*"]
+    # Host/transport-security configuration moved between SDK majors: 1.x
+    # mutates server.settings, while 2.x has no such fields and takes them as
+    # arguments to the app factory. `_compat.build_network_app` owns that
+    # divergence — see its docstring.
+    from ._compat import build_network_app
 
-    # Build the ASGI app
-    if transport == "sse":
-        app = mcp.sse_app()
-    else:
-        app = mcp.streamable_http_app()
+    app = build_network_app(mcp, transport, host, port)
 
     # Wrap with bearer token auth if configured
     api_key = os.environ.get("YANTRIKDB_API_KEY")

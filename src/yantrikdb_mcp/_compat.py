@@ -60,9 +60,69 @@ except ImportError:  # pragma: no cover - exercised on the 1.x CI leg
 # on 2.x it IS MCPServer. Callers must not care which.
 MCPServer = _ServerClass
 
-__all__ = ["MCPServer", "Context", "ToolError", "ToolAnnotations", "MCP_MAJOR"]
+__all__ = [
+    "MCPServer",
+    "Context",
+    "ToolError",
+    "ToolAnnotations",
+    "MCP_MAJOR",
+    "build_network_app",
+    "sdk_line",
+]
 
 
 def sdk_line() -> str:
     """Human-readable SDK line, for --help / diagnostics."""
     return f"mcp {MCP_MAJOR}.x"
+
+
+def build_network_app(server, transport: str, host: str, port: int):
+    """Build the ASGI app for `sse` / `streamable-http` on either SDK line.
+
+    THE SECOND REAL DIVERGENCE between the majors, and the one that actually
+    bites deployments rather than tests:
+
+      1.x  configuration is MUTABLE STATE on the server —
+             server.settings.host = ...
+             server.settings.transport_security.allowed_hosts = [...]
+           then `server.sse_app()` reads it back.
+
+      2.x  `Settings` has NO host/port/transport_security fields at all;
+           assigning one raises `ValueError: "Settings" object has no field
+           "host"`. Host and security are ARGUMENTS to the app factory:
+             server.sse_app(host=..., transport_security=...)
+
+    So the 1.x code path doesn't merely misconfigure on 2.x — it raises, and
+    the server never starts. That is invisible to a stdio test suite, which is
+    exactly how it shipped in v0.12.0: every e2e case drives stdio, while the
+    deployed SSE servers take this path. Fixed in v0.12.1, with
+    `tests/test_network_transport_compat.py` covering both lines.
+
+    TransportSecuritySettings itself is identical on both majors — only the
+    place you attach it moved.
+
+    Binding note: uvicorn is what actually binds host:port (see
+    `_run_network`). On 1.x the settings assignment additionally feeds the
+    SDK's own URL construction, so it is still set there for fidelity.
+    """
+    from mcp.server.transport_security import TransportSecuritySettings
+
+    # This server is deliberately permissive: it is normally reached over a
+    # LAN/tunnel and fronted by bearer-token auth (see auth.BearerTokenMiddleware),
+    # not by host/origin allowlisting.
+    security = TransportSecuritySettings(
+        enable_dns_rebinding_protection=False,
+        allowed_hosts=["*"],
+        allowed_origins=["*"],
+    )
+
+    if MCP_MAJOR == 1:
+        server.settings.host = host
+        server.settings.port = port
+        server.settings.transport_security = security
+        return server.sse_app() if transport == "sse" else server.streamable_http_app()
+
+    # 2.x — pass configuration in rather than mutating settings.
+    if transport == "sse":
+        return server.sse_app(host=host, transport_security=security)
+    return server.streamable_http_app(host=host, transport_security=security)
