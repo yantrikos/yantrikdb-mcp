@@ -554,6 +554,37 @@ class HttpBackend:
                                   hint="Trigger-upcoming listing isn't "
                                        "exposed over HTTP yet.")
 
+    # ── v0.12 engine surface — time-travel recall ───────────────────
+
+    def recall_as_of(self, as_of, query=None, query_embedding=None,
+                     top_k: int = 10, namespace=None, memory_type=None, **_kw):
+        """REFUSED over HTTP until the cluster advertises the capability.
+
+        This is deliberately NOT forwarded as an extra param on /v1/recall.
+        `as_of` changes WHICH QUESTION is being answered: a server that does
+        not implement it would ignore the field and return TODAY's memories,
+        so an agent asking "what did we know on 2026-08-01" would receive
+        present-day belief presented as historical fact — a confident wrong
+        answer, which is strictly worse than an error.
+
+        That is the same call made for `idempotency_key` on this backend
+        (agreement #6: never silently degrade). Contrast `include_superseded`,
+        which IS forwarded: an older server ignoring it returns the same row
+        shape, merely without the archaeology — a mild, self-evident
+        degradation rather than a changed question.
+
+        Flip this to a real /v1/recall?as_of=... call once the server
+        advertises it (e.g. via a capability flag on /v1/health), exactly as
+        planned for the idempotency-key forward.
+        """
+        raise self._not_supported(
+            "recall_as_of",
+            "time-travel recall is embedded-mode only for now. Forwarding it "
+            "blind would let a server that ignores `as_of` answer with today's "
+            "memories as though they were the past. Use embedded mode "
+            "(unset YANTRIKDB_SERVER_URL) for as_of queries.",
+        )
+
     # ── v0.8.0 / v0.9.0 engine surface — stubs until /v1/* lands ────
     # The engine v0.8.0/v0.9.0 added 25 new methods (tiering, demand,
     # conversation, tasks, hygiene primitives, link primitives,
