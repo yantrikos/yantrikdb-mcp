@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "yantrikdb-mcp"
-version = "0.12.1"
+version = "0.13.0"
 description = "YantrikDB — Cognitive memory for AI agents. Persistent semantic recall, knowledge graph, contradiction detection, and procedural learning. Ships as embeddable engine, network database, or MCP server."
 readme = "README.md"
 license = "MIT"
@@ -66,7 +66,14 @@ dependencies = [
     # The PIN IS A BACKSTOP — the behavioral gates are the feature-probed
     # contract suites (test_v010_/test_v011_engine_contract_cases.py) +
     # tests/test_mcp_semantic_contract.py.
-    "yantrikdb>=0.10.0,<0.12.0",
+    # v0.12.0 (cross-validated): time-travel recall — recall_as_of(as_of, ...)
+    # returns the substrate as it was known at a past instant, and seal_pack
+    # gains recommended_top_k / recommended_min_similarity so a publisher can
+    # sign retrieval settings into a pack manifest. Purely ADDITIVE over 0.11:
+    # the full v0.10 + v0.11 gates stay green on 0.12.0 (verified BEFORE
+    # widening). Range widens to <0.13.0 only because 0.12 is now feature-probed
+    # by tests/test_v012_engine_contract_cases.py.
+    "yantrikdb>=0.10.0,<0.13.0",
     # D3 firewall, same rule as the engine pin above — and for the same
     # reason, learned the same way. `mcp[cli]>=1.2.0` was UNBOUNDED, so the
     # day the SDK shipped 2.0.0 it removed `mcp.server.fastmcp` and every

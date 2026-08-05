@@ -3,6 +3,7 @@
 import json
 import logging
 import os
+import re
 import time
 
 from ._compat import Context, ToolAnnotations, ToolError
@@ -88,6 +89,64 @@ def _translate_idempotency_error(e: Exception, key: str) -> str | None:
             idempotency_key=key,
         )
     return None
+
+
+def _parse_as_of(value: str | float | int) -> float:
+    """Turn an agent-supplied instant into the unix float the engine requires.
+
+    `db.recall_as_of()` takes a unix timestamp and NOTHING else — an ISO string
+    raises a bare `TypeError: argument 'as_of': must be real number, not str`.
+    An agent asked for "what did we know on 2026-08-01" will reach for the
+    date string every time, so the MCP layer absorbs that instead of forwarding
+    a type error the model cannot act on.
+
+    Accepted, in the order an agent is likely to try them:
+      "2026-08-01"              date (UTC midnight)
+      "2026-08-01T14:30:00Z"    ISO datetime, Z or +00:00 or naive (assumed UTC)
+      "7d" / "24h" / "30m"      relative — that long BEFORE now
+      1785898500 / "1785898500" unix seconds
+
+    Raises ToolError naming every accepted form — a parse failure must teach
+    the caller the grammar, not just report a rejection.
+    """
+    from datetime import datetime, timezone
+
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return float(value)
+
+    s = str(value).strip()
+    if not s:
+        raise ToolError("as_of is empty — give a date, ISO datetime, relative age, or unix timestamp")
+
+    # Relative: "7d" / "24h" / "30m" / "90s" = that long ago.
+    m = re.fullmatch(r"(\d+(?:\.\d+)?)\s*([smhdw])", s, re.IGNORECASE)
+    if m:
+        n = float(m.group(1))
+        mult = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800}[m.group(2).lower()]
+        return time.time() - (n * mult)
+
+    # Bare unix timestamp (as a string).
+    try:
+        return float(s)
+    except ValueError:
+        pass
+
+    # ISO date / datetime. Normalise the trailing Z that fromisoformat rejects
+    # on older Pythons, and treat a naive timestamp as UTC rather than local —
+    # server-local time would make the same query mean different things on
+    # different hosts.
+    iso = s[:-1] + "+00:00" if s.endswith(("Z", "z")) else s
+    try:
+        dt = datetime.fromisoformat(iso)
+    except ValueError:
+        raise ToolError(
+            f"could not parse as_of={value!r}. Use a date (2026-08-01), an ISO "
+            f"datetime (2026-08-01T14:30:00Z), a relative age (7d / 24h / 30m), "
+            f"or a unix timestamp."
+        )
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.timestamp()
 
 
 # ── v0.10.0 response-shaping helpers ──
@@ -1326,24 +1385,70 @@ def temporal(
     days: float = 30.0,
     limit: int = 20,
     namespace: str | None = None,
+    query: str | None = None,
+    as_of: str | None = None,
     ctx: Context = None,
 ) -> str:
-    """Find stale or upcoming memories based on time.
+    """Find stale or upcoming memories, or recall the past AS IT WAS KNOWN.
 
     ACTIONS:
     - "stale": Important memories not accessed recently. Good for maintenance.
     - "upcoming": Memories with approaching deadlines/events. Good for proactive alerts.
+    - "as_of": TIME-TRAVEL recall — what the substrate knew at a past moment.
+               Requires `query` and `as_of`. Memories recorded AFTER that
+               instant are excluded, so you see the belief you actually held
+               then, not today's. Use it to answer "what did we think before
+               X changed?" or to check whether a decision was made on
+               information available at the time. Needs engine v0.12+.
 
     Args:
-        action: "stale" or "upcoming".
+        action: "stale", "upcoming", or "as_of".
         days: Inactivity threshold (stale) or look-ahead window (upcoming).
         limit: Max results.
         namespace: Optional filter.
+        query: Search text — REQUIRED for "as_of".
+        as_of: The past instant, REQUIRED for "as_of". Accepts "YYYY-MM-DD",
+               an ISO datetime ("2026-08-01T14:30:00Z"), a relative age
+               ("7d", "24h", "30m" = that long ago), or a unix timestamp.
     """
-    if action not in ("stale", "upcoming"):
-        raise ToolError("action must be 'stale' or 'upcoming'")
+    if action not in ("stale", "upcoming", "as_of"):
+        raise ToolError("action must be 'stale', 'upcoming', or 'as_of'")
 
     db = _get_db(ctx)
+
+    if action == "as_of":
+        if not query or not query.strip():
+            raise ToolError("as_of requires `query` — the text to search for at that point in time")
+        if not as_of:
+            raise ToolError(
+                "as_of requires `as_of` — the past instant to look back to "
+                '(e.g. "2026-08-01", "2026-08-01T14:30:00Z", "7d", or a unix timestamp)'
+            )
+        if not hasattr(db, "recall_as_of"):
+            # Honest surface (agreement #6): name the requirement, don't
+            # silently fall back to a present-day recall that would answer a
+            # DIFFERENT question than the one asked.
+            return _err(
+                "time-travel recall needs engine v0.12+; this server runs an older "
+                "engine. Upgrade the engine, or use recall() for present-day results "
+                "(note: that answers a different question).",
+                required_engine="0.12.0",
+            )
+        ts = _parse_as_of(as_of)
+        rows = db.recall_as_of(ts, query=query, top_k=limit, namespace=namespace)
+        return json.dumps({
+            "as_of": as_of,
+            "as_of_unix": round(ts, 3),
+            "count": len(rows or []),
+            # Stated explicitly so the agent doesn't read an empty/short result
+            # as "nothing was ever known about this".
+            "note": "only memories recorded at or before as_of are included",
+            "results": [
+                {"rid": m.get("rid"), "text": m.get("text"),
+                 "importance": m.get("importance"), "created_at": m.get("created_at")}
+                for m in (rows or []) if isinstance(m, dict)
+            ],
+        })
 
     if action == "stale":
         memories = db.stale(days, limit, namespace)
