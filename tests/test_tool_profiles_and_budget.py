@@ -55,7 +55,25 @@ FULL_TOOLS = CORE_TOOLS | {
 # pack silently rewrites what the agent believes. The headroom above the
 # measured 43,289 is deliberately small so the NEXT addition also has to be
 # argued for. `core` profile is unaffected — pack is specialist-tier.
-SCHEMA_BUDGET_CHARS = 45_500
+#
+# 45_500 -> 46_800 on the v0.13.0 branch (REVIEWED, two reasons):
+#
+# (1) `temporal` gains `as_of` + `query` for engine v0.12 time-travel recall.
+#     The gate fired at 46,080 and the discretionary prose was trimmed first
+#     (temporal 1,846 -> 1,351); what remains is the irreducible cost of two
+#     params plus the accepted-timestamp grammar. That grammar EARNS its
+#     chars: the engine takes a unix float only, so an agent that guesses
+#     "2026-08-01" burns a whole call on a TypeError it cannot act on.
+#
+# (2) THIS GATE IS PYTHON-VERSION SENSITIVE, which the old number hid.
+#     Same commit, same tools: 43,813 on py3.13 but 46,080 on py3.10/3.12 —
+#     ~1,700 chars of difference in how the JSON schema for `str | None`
+#     unions is rendered. The budget must clear the LARGEST supported
+#     interpreter, not the one a developer happens to run, or CI fails on a
+#     diff that looked fine locally (exactly what happened here).
+#     Follow-up worth doing: measure per-interpreter rather than assuming one
+#     number fits all, so this ceiling stops drifting with the Python matrix.
+SCHEMA_BUDGET_CHARS = 46_800
 
 
 def _rpc(proc, method, params, mid):

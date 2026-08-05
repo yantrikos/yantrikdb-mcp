@@ -1389,27 +1389,22 @@ def temporal(
     as_of: str | None = None,
     ctx: Context = None,
 ) -> str:
-    """Find stale or upcoming memories, or recall the past AS IT WAS KNOWN.
+    """Find stale or upcoming memories, or recall the past as it was known.
 
     ACTIONS:
-    - "stale": Important memories not accessed recently. Good for maintenance.
-    - "upcoming": Memories with approaching deadlines/events. Good for proactive alerts.
-    - "as_of": TIME-TRAVEL recall — what the substrate knew at a past moment.
-               Requires `query` and `as_of`. Memories recorded AFTER that
-               instant are excluded, so you see the belief you actually held
-               then, not today's. Use it to answer "what did we think before
-               X changed?" or to check whether a decision was made on
-               information available at the time. Needs engine v0.12+.
+    - "stale": Important memories not accessed recently.
+    - "upcoming": Memories with approaching deadlines/events.
+    - "as_of": Time-travel recall — excludes anything recorded after `as_of`,
+               so you see the belief held then, not today's. Engine v0.12+.
 
     Args:
         action: "stale", "upcoming", or "as_of".
         days: Inactivity threshold (stale) or look-ahead window (upcoming).
         limit: Max results.
         namespace: Optional filter.
-        query: Search text — REQUIRED for "as_of".
-        as_of: The past instant, REQUIRED for "as_of". Accepts "YYYY-MM-DD",
-               an ISO datetime ("2026-08-01T14:30:00Z"), a relative age
-               ("7d", "24h", "30m" = that long ago), or a unix timestamp.
+        query: Search text (required for "as_of").
+        as_of: Past instant (required for "as_of"): "2026-08-01",
+               "2026-08-01T14:30:00Z", "7d"/"24h" (ago), or unix seconds.
     """
     if action not in ("stale", "upcoming", "as_of"):
         raise ToolError("action must be 'stale', 'upcoming', or 'as_of'")
