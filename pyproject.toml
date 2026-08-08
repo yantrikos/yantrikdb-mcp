@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "yantrikdb-mcp"
-version = "0.13.0"
+version = "0.14.0"
 description = "YantrikDB — Cognitive memory for AI agents. Persistent semantic recall, knowledge graph, contradiction detection, and procedural learning. Ships as embeddable engine, network database, or MCP server."
 readme = "README.md"
 license = "MIT"
@@ -73,7 +73,18 @@ dependencies = [
     # the full v0.10 + v0.11 gates stay green on 0.12.0 (verified BEFORE
     # widening). Range widens to <0.13.0 only because 0.12 is now feature-probed
     # by tests/test_v012_engine_contract_cases.py.
-    "yantrikdb>=0.10.0,<0.13.0",
+    # v0.13.x (PyPI 0.13.4, cross-validated): NO methods removed, but it
+    # carries the most dangerous kind of change this train has seen — a
+    # DEFAULT THAT FLIPPED. recall(expand_entities=) went True -> False.
+    # Nothing raises, signatures still accept the same args, and every test
+    # stays green; recall just quietly returns different results for anyone
+    # relying on the default. This package is insulated because tools.recall()
+    # declares its own default and passes it explicitly — now PINNED by
+    # tests/test_v013_engine_contract_cases.py so a refactor can't drop it.
+    # Additive: recall(snippets=, min_score_ratio=), recall_text(explain=),
+    # detect_embedder_window(), oplog_plaintext_rows(), rechunk_long_records().
+    # Range widens to <0.14.0 only because 0.13 is now feature-probed.
+    "yantrikdb>=0.10.0,<0.14.0",
     # D3 firewall, same rule as the engine pin above — and for the same
     # reason, learned the same way. `mcp[cli]>=1.2.0` was UNBOUNDED, so the
     # day the SDK shipped 2.0.0 it removed `mcp.server.fastmcp` and every
