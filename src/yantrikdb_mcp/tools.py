@@ -364,6 +364,7 @@ def recall(
     include_consolidated: bool = False,
     include_superseded: bool = False,
     expand_entities: bool = True,
+    min_score_ratio: float | None = None,
     refine_from: str | None = None,
     refine_exclude: list[str] | None = None,
     ctx: Context = None,
@@ -405,6 +406,10 @@ def recall(
             default (current-by-default). Set True only for history /
             archaeology over a revision chain.
         expand_entities: Use knowledge graph boosting (default True).
+        min_score_ratio: Drop hits scoring below this fraction of the TOP hit
+            (0.8 = keep only near-as-good matches). Semantic search always
+            returns top_k, even when one result is relevant and the rest are
+            noise; this trims the tail instead of making you judge it.
         refine_from: Original query text to refine from. query becomes the refinement.
         refine_exclude: Memory IDs to exclude when refining.
     """
@@ -464,6 +469,30 @@ def recall(
             include_consolidated=include_consolidated, expand_entities=expand_entities,
             namespace=namespace, domain=domain, source=source,
         )
+    # Relative score cutoff, applied CLIENT-SIDE on purpose.
+    #
+    # Engine v0.13 added `min_score_ratio=` to row-level db.recall(), but NOT
+    # to db.recall_with_response() — the path this tool takes by default. Using
+    # the engine param would make the filter work only when
+    # include_superseded=True, i.e. a parameter that silently does nothing on
+    # the common path. Absent beats advertised-but-inert (agreement #6).
+    #
+    # Filtering here is equivalent, not an approximation: verified against
+    # engine 0.13.4 at ratios 0.5 / 0.8 / 0.95 — identical result sets, because
+    # the engine also filters after ranking rather than backfilling to top_k.
+    # Client-side additionally works on ANY engine >= our floor and on the
+    # HTTP cluster backend, neither of which carries the new kwarg.
+    filtered_by_ratio = 0
+    if min_score_ratio is not None:
+        if not 0.0 < min_score_ratio <= 1.0:
+            raise ToolError("min_score_ratio must be > 0 and <= 1 (e.g. 0.8)")
+        rows_in = response.get("results") or []
+        top = max((r.get("score", 0.0) for r in rows_in), default=0.0)
+        if top > 0:
+            kept = [r for r in rows_in if r.get("score", 0.0) >= min_score_ratio * top]
+            filtered_by_ratio = len(rows_in) - len(kept)
+            response["results"] = kept
+
     items = []
     for r in response["results"]:
         item = {
@@ -482,11 +511,17 @@ def recall(
         {"hint_type": h["hint_type"], "suggestion": h["suggestion"]}
         for h in response["hints"]
     ]
-    return json.dumps({
+    out = {
         "count": len(items), "results": items,
         "confidence": round(response["confidence"], 4),
         "hints": hints,
-    })
+    }
+    # Say so when the cutoff dropped hits. Otherwise a filtered result reads
+    # like "the substrate barely knows this", and the agent's next move is a
+    # broader re-query it doesn't need — or a wrong conclusion about coverage.
+    if filtered_by_ratio:
+        out["filtered_by_min_score_ratio"] = filtered_by_ratio
+    return json.dumps(out)
 
 
 # ── 3. forget ──
