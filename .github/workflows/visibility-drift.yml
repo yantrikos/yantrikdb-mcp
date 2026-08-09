@@ -1,0 +1,66 @@
+name: Visibility drift check
+
+# Weekly deterministic check that the public surfaces still agree:
+# the official MCP registry must carry the same version as PyPI.
+# On drift it first tries the fix (re-run the registry publish), and
+# files an issue only if the fix path can't close the gap.
+
+on:
+  schedule:
+    - cron: "23 14 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+  actions: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Compare PyPI vs MCP registry
+        id: drift
+        run: |
+          PYPI=$(curl -fsSL https://pypi.org/pypi/yantrikdb-mcp/json | jq -r .info.version)
+          REGISTRY_VERSIONS=$(curl -fsSL "https://registry.modelcontextprotocol.io/v0/servers?search=yantrikdb" \
+            | jq -r '.servers[].server | select(.name=="io.github.yantrikos/yantrikdb-mcp") | .version')
+          echo "pypi=$PYPI"
+          echo "registry versions: $REGISTRY_VERSIONS"
+          if echo "$REGISTRY_VERSIONS" | grep -qx "$PYPI"; then
+            echo "in_sync=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "in_sync=false" >> "$GITHUB_OUTPUT"
+            echo "pypi=$PYPI" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Try the fix — re-run registry publish
+        if: steps.drift.outputs.in_sync == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh workflow run mcp-registry.yml --repo "$GITHUB_REPOSITORY"
+          sleep 120
+          PYPI="${{ steps.drift.outputs.pypi }}"
+          REGISTRY_VERSIONS=$(curl -fsSL "https://registry.modelcontextprotocol.io/v0/servers?search=yantrikdb" \
+            | jq -r '.servers[].server | select(.name=="io.github.yantrikos/yantrikdb-mcp") | .version')
+          if echo "$REGISTRY_VERSIONS" | grep -qx "$PYPI"; then
+            echo "self_healed=true" >> "$GITHUB_ENV"
+          else
+            echo "self_healed=false" >> "$GITHUB_ENV"
+          fi
+
+      - name: File issue if still drifted
+        if: steps.drift.outputs.in_sync == 'false' && env.self_healed == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TITLE="Registry drift: MCP registry lags PyPI ${{ steps.drift.outputs.pypi }}"
+          EXISTING=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --search "Registry drift in:title" --json number --jq '.[0].number // empty')
+          if [ -n "$EXISTING" ]; then
+            gh issue comment "$EXISTING" --repo "$GITHUB_REPOSITORY" \
+              --body "Still drifted as of $(date -u +%F). Automatic re-publish did not close the gap — check the mcp-registry.yml run logs."
+          else
+            gh issue create --repo "$GITHUB_REPOSITORY" --title "$TITLE" \
+              --body "The official MCP registry does not list the current PyPI version (${{ steps.drift.outputs.pypi }}). The automatic re-publish (mcp-registry.yml) was dispatched and did not close the gap — its logs are the place to look. This issue was filed by visibility-drift.yml."
+          fi
