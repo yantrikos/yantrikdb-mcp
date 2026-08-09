@@ -3,7 +3,7 @@
 
 **YantrikDB — Cognitive memory for AI agents. Persistent semantic recall, knowledge graph, contradiction detection, and procedural learning. Ships as embeddable engine, network database, or MCP server.**
 
-Works with Claude Code, Cursor, Windsurf, [Hermes Agent](docs/hermes.md), and any MCP-compatible client. Ships a portable [Agent Skills](https://agentskills.io) skill — [`skills/persistent-memory`](skills/persistent-memory/SKILL.md) — that teaches any compliant harness the memory golden path.
+Works with Claude Code, Cursor, Windsurf, [Hermes Agent](docs/hermes.md), [Prime Agent](docs/prime-agent.md), and any MCP-compatible client. Ships a portable [Agent Skills](https://agentskills.io) skill — [`skills/persistent-memory`](skills/persistent-memory/SKILL.md) — that teaches any compliant harness the memory golden path.
 
 **Website:** [yantrikdb.com](https://yantrikdb.com) · **Docs:** [yantrikdb.com/guides/mcp](https://yantrikdb.com/guides/mcp/) · **GitHub:** [yantrikos/yantrikdb-mcp](https://github.com/yantrikos/yantrikdb-mcp) · **Paper:** [Skill as Memory, Not Document](https://doi.org/10.5281/zenodo.20128887)
 
@@ -13,7 +13,7 @@ Works with Claude Code, Cursor, Windsurf, [Hermes Agent](docs/hermes.md), and an
 |---|---|
 | **What it is** | An MCP server that gives any MCP-compatible AI agent persistent, structured, queryable memory across sessions |
 | **Install** | `pip install yantrikdb-mcp` |
-| **Works with** | Claude Code, Cursor, Windsurf, Continue, Claude Desktop, [Hermes Agent](docs/hermes.md), any MCP client |
+| **Works with** | Claude Code, Cursor, Windsurf, Continue, Claude Desktop, [Hermes Agent](docs/hermes.md), [Prime Agent](docs/prime-agent.md), any MCP client |
 | **Storage** | Local SQLite at `~/.yantrikdb/memory.db` (or any path; or HTTP cluster) |
 | **Embedder** | Bundled 64-dim Rust embedder (default), 384-dim ONNX MiniLM (`[onnx]` extra), 256-dim multilingual (101 languages) |
 | **Tools** | 19 — remember, recall, forget, correct, think, memory, graph, conflict, trigger, session, temporal, procedure, category, personality, stats, skill, gaps, conversation, task |
