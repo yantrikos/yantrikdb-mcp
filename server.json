@@ -1,21 +1,34 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.yantrikos/yantrikdb-mcp",
-  "description": "Cognitive memory for AI agents — semantic memory, knowledge graph, and adaptive recall",
+  "description": "Cognitive memory for AI agents — persistent semantic recall, knowledge graph, contradiction detection, and procedural learning",
   "repository": {
     "url": "https://github.com/yantrikos/yantrikdb-mcp",
     "source": "github"
   },
-  "version": "0.4.7",
+  "version": "0.14.0",
   "packages": [
     {
       "registryType": "pypi",
       "identifier": "yantrikdb-mcp",
-      "version": "0.4.7",
+      "version": "0.14.0",
       "transport": {
         "type": "stdio"
       },
-      "environmentVariables": []
+      "environmentVariables": [
+        {
+          "name": "YANTRIKDB_DB_PATH",
+          "description": "Database file path (default: ~/.yantrikdb/memory.db)",
+          "isRequired": false,
+          "isSecret": false
+        },
+        {
+          "name": "YANTRIKDB_TOOL_PROFILE",
+          "description": "Advertised tool set: full (all 20) or core (10 golden-path)",
+          "isRequired": false,
+          "isSecret": false
+        }
+      ]
     }
   ]
 }
