@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 import pytest
 
 from yantrikdb_mcp._compat import ToolError
-from yantrikdb_mcp.tools import _parse_as_of, temporal
+from yantrikdb_mcp.tools import _parse_timestamp as _parse_as_of, temporal
 
 
 # ── the parser ───────────────────────────────────────────────────────

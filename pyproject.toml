@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "yantrikdb-mcp"
-version = "0.14.0"
+version = "0.15.0"
 description = "YantrikDB — Cognitive memory for AI agents. Persistent semantic recall, knowledge graph, contradiction detection, and procedural learning. Ships as embeddable engine, network database, or MCP server."
 readme = "README.md"
 license = "MIT"
@@ -84,7 +84,19 @@ dependencies = [
     # Additive: recall(snippets=, min_score_ratio=), recall_text(explain=),
     # detect_embedder_window(), oplog_plaintext_rows(), rechunk_long_records().
     # Range widens to <0.14.0 only because 0.13 is now feature-probed.
-    "yantrikdb>=0.10.0,<0.14.0",
+    # v0.14.0 (cross-validated): core's ledger flags a COMPILE BREAK on
+    # RecordInput (Rust). That break does NOT reach this package: adding a
+    # field to a Rust struct breaks exhaustive struct-literal construction in
+    # RUST callers (yantrikdb-server), while Python crosses the pyo3 boundary
+    # with dicts and simply doesn't set the new key. Verified, not assumed —
+    # tests/test_v014_engine_contract_cases.py round-trips the exact dict
+    # shape tools.remember() builds. "Compile break" in a ledger is a
+    # per-LANGUAGE claim, not a per-consumer one.
+    # Python-side delta is additive: record/record_text gain created_at=
+    # (backdating, now surfaced as remember(created_at=)) and get_memory()
+    # arrives as an alias of get(). Range widens to <0.15.0 only because 0.14
+    # is now feature-probed.
+    "yantrikdb>=0.10.0,<0.15.0",
     # D3 firewall, same rule as the engine pin above — and for the same
     # reason, learned the same way. `mcp[cli]>=1.2.0` was UNBOUNDED, so the
     # day the SDK shipped 2.0.0 it removed `mcp.server.fastmcp` and every
