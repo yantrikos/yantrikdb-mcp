@@ -91,6 +91,19 @@ def _translate_idempotency_error(e: Exception, key: str) -> str | None:
     return None
 
 
+def _iso_utc(ts: float | int) -> str:
+    """Unix seconds -> "2026-03-14T09:21:07Z".
+
+    Recall hits carry timestamps so a caller can tell "March" from "today"
+    without arithmetic — see the created_at note in recall(). Seconds
+    precision: sub-second detail costs characters on every hit and no agent
+    reasons over it.
+    """
+    from datetime import datetime, timezone
+
+    return datetime.fromtimestamp(float(ts), timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 def _parse_timestamp(value: str | float | int, *, field: str = "as_of") -> float:
     """Turn an agent-supplied instant into the unix float the engine requires.
 
@@ -548,6 +561,33 @@ def recall(
             "why_retrieved": r["why_retrieved"],
             "emotional_state": r.get("emotional_state"),
         }
+        # created_at — reported by yantrikdb-core 2026-08-12 as dropped by this
+        # projection, and it is the highest-value field we were discarding.
+        #
+        # recall ranks by SIMILARITY, not time. This same layer emits a hint
+        # saying exactly that ("for the exact latest entry use chain_head")
+        # while withholding the timestamps a caller needs to act on it — the
+        # ranking was both wrong AND unauditable. Core's measured case: rank 1
+        # was a March blob claiming "v0.1.0", rank 2 was that day's correct
+        # record. With dates visible the caller picks correctly DESPITE the
+        # imperfect ranking. One field turns an unrecoverable failure into a
+        # recoverable one.
+        #
+        # Emitted as ISO-8601 UTC rather than the raw float: "2026-03-14T…" is
+        # instantly comparable to "today" by a reader that does no arithmetic,
+        # which is the entire point. Raw epoch seconds are preserved alongside
+        # for callers doing real comparisons.
+        created = r.get("created_at")
+        if created is not None:
+            item["created_at"] = _iso_utc(created)
+            item["created_at_unix"] = round(float(created), 3)
+        # similarity — core's minimum ask for the scores breakdown. This is
+        # what actually EXPLAINS a ranking; `score` is the blended value, so
+        # two hits can share a score for entirely different reasons. Prose
+        # (why_retrieved) stays ALONGSIDE the numbers, never instead of them.
+        scores = r.get("scores") or {}
+        if "similarity" in scores:
+            item["similarity"] = round(scores["similarity"], 4)
         # A3: prune only the allowlisted safe null (emotional_state).
         items.append(_prune_nulls(item, _RECALL_PRUNABLE_NULLS))
     hints = [
