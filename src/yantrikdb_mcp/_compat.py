@@ -36,6 +36,8 @@ is the truth and the version is a backstop.
 """
 from __future__ import annotations
 
+import os
+
 # ToolAnnotations lives in mcp.types on BOTH lines — no shim needed, but it's
 # re-exported here so callers have exactly one import site for MCP symbols.
 from mcp.types import ToolAnnotations
@@ -116,13 +118,45 @@ def build_network_app(server, transport: str, host: str, port: int):
         allowed_origins=["*"],
     )
 
+    # STATELESS streamable-http: the only configuration that actually SURVIVES
+    # a server restart.
+    #
+    # Both SSE and stateful streamable-http keep a session table in memory. A
+    # restart empties it, the client's session id becomes unknown, and every
+    # subsequent call fails — SSE with `404 Could not find session`, 2.x
+    # streamable-http with `-32600 Session not found`. The server is behaving
+    # correctly in both cases; the client simply has no session to resume, and
+    # most clients surface that as an opaque error rather than reconnecting.
+    #
+    # Stateless mode removes the session entirely: every request carries its
+    # own context, so there is nothing to go stale. That converts "restart the
+    # client after every server upgrade" into a non-event. Opt-in because it
+    # costs per-request re-initialisation and rules out server->client
+    # streaming features that need a durable session.
+    stateless = os.environ.get("YANTRIKDB_STATELESS_HTTP", "").strip().lower() in (
+        "1", "true", "yes",
+    )
+    if stateless and transport != "streamable-http":
+        # Honest surface: SSE has no stateless mode, so silently ignoring the
+        # flag would leave the operator believing restarts are survivable.
+        raise ValueError(
+            "YANTRIKDB_STATELESS_HTTP requires --transport streamable-http; "
+            "SSE is session-bound by design and cannot run stateless."
+        )
+
     if MCP_MAJOR == 1:
         server.settings.host = host
         server.settings.port = port
         server.settings.transport_security = security
-        return server.sse_app() if transport == "sse" else server.streamable_http_app()
+        if transport == "sse":
+            return server.sse_app()
+        # 1.x reads stateless_http off settings when the app is built.
+        server.settings.stateless_http = stateless
+        return server.streamable_http_app()
 
     # 2.x — pass configuration in rather than mutating settings.
     if transport == "sse":
         return server.sse_app(host=host, transport_security=security)
-    return server.streamable_http_app(host=host, transport_security=security)
+    return server.streamable_http_app(
+        host=host, transport_security=security, stateless_http=stateless,
+    )

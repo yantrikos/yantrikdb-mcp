@@ -46,6 +46,8 @@ def main():
         print("  YANTRIKDB_EMBEDDING_MODEL  Sentence transformer model (default: all-MiniLM-L6-v2)")
         print("  YANTRIKDB_EMBEDDING_DIM    Embedding dimension (default: 384)")
         print("  YANTRIKDB_API_KEY          Bearer token for SSE/HTTP auth (required for network transports)")
+        print("  YANTRIKDB_STATELESS_HTTP   1 = no server-side sessions (streamable-http only).")
+        print("                             Survives server restarts: clients need no reconnect.")
         print("  YANTRIKDB_ENABLE_PACK_WRITES  Allow pack install/mount/trust writes (default: off; reads always on)")
         print()
         print("Remote cluster mode (set YANTRIKDB_SERVER_URL to use HTTP backend instead of embedded engine):")
