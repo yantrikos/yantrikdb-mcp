@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "yantrikdb-mcp"
-version = "0.16.0"
+version = "0.17.0"
 description = "YantrikDB — Cognitive memory for AI agents. Persistent semantic recall, knowledge graph, contradiction detection, and procedural learning. Ships as embeddable engine, network database, or MCP server."
 readme = "README.md"
 license = "MIT"
@@ -96,7 +96,27 @@ dependencies = [
     # (backdating, now surfaced as remember(created_at=)) and get_memory()
     # arrives as an alias of get(). Range widens to <0.15.0 only because 0.14
     # is now feature-probed.
-    "yantrikdb>=0.10.0,<0.15.0",
+    # v0.14.1 is the FLOOR, not merely allowed — the first time this package
+    # has raised a lower bound for a CORRECTNESS reason rather than to reach a
+    # feature. 0.14.0 and earlier return wrong results specifically through
+    # THIS server, and only through it:
+    #   - The entity stoplist compared case-SENSITIVELY against capitalized
+    #     forms, so "At" was stripped while "AT" survived and became an entity.
+    #     tokenize() lowercases it, so the phantom entity matched EVERY query
+    #     containing the word "at". Likewise THE, DID, and June.
+    #   - Graph proximity was ADDITIVE (0.30 floor), which no similarity below
+    #     0.86 could overcome. Now scaled to 0.125 — graph may reverse at most
+    #     a 12.5% similarity gap, the same ceiling freshness gets.
+    # These were invisible to core's benchmark because expand_entities defaults
+    # to FALSE in the engine and this server turns it ON. Reproduced on a
+    # 5,027-record production store: "encryption at rest and key rotation"
+    # returned a REAL-ESTATE TAX ANALYSIS at cosine 0.0346, joined by
+    # "claims_match: AT -acquired-> 25 (anchor AT)". On 0.14.1 that record is
+    # gone from the top 5 and every phantom anchor with it.
+    # Ranking DOES move — that is the point — so the floor is safe here only
+    # because our cases gate on feature probes, never on golden orderings
+    # (265 passed unchanged against 0.14.1).
+    "yantrikdb>=0.14.1,<0.15.0",
     # D3 firewall, same rule as the engine pin above — and for the same
     # reason, learned the same way. `mcp[cli]>=1.2.0` was UNBOUNDED, so the
     # day the SDK shipped 2.0.0 it removed `mcp.server.fastmcp` and every
