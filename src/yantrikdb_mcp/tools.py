@@ -91,7 +91,20 @@ def _translate_idempotency_error(e: Exception, key: str) -> str | None:
     return None
 
 
-def _parse_as_of(value: str | float | int) -> float:
+def _iso_utc(ts: float | int) -> str:
+    """Unix seconds -> "2026-03-14T09:21:07Z".
+
+    Recall hits carry timestamps so a caller can tell "March" from "today"
+    without arithmetic — see the created_at note in recall(). Seconds
+    precision: sub-second detail costs characters on every hit and no agent
+    reasons over it.
+    """
+    from datetime import datetime, timezone
+
+    return datetime.fromtimestamp(float(ts), timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _parse_timestamp(value: str | float | int, *, field: str = "as_of") -> float:
     """Turn an agent-supplied instant into the unix float the engine requires.
 
     `db.recall_as_of()` takes a unix timestamp and NOTHING else — an ISO string
@@ -116,7 +129,7 @@ def _parse_as_of(value: str | float | int) -> float:
 
     s = str(value).strip()
     if not s:
-        raise ToolError("as_of is empty — give a date, ISO datetime, relative age, or unix timestamp")
+        raise ToolError(f"{field} is empty — give a date, ISO datetime, relative age, or unix timestamp")
 
     # Relative: "7d" / "24h" / "30m" / "90s" = that long ago.
     m = re.fullmatch(r"(\d+(?:\.\d+)?)\s*([smhdw])", s, re.IGNORECASE)
@@ -140,7 +153,7 @@ def _parse_as_of(value: str | float | int) -> float:
         dt = datetime.fromisoformat(iso)
     except ValueError:
         raise ToolError(
-            f"could not parse as_of={value!r}. Use a date (2026-08-01), an ISO "
+            f"could not parse {field}={value!r}. Use a date (2026-08-01), an ISO "
             f"datetime (2026-08-01T14:30:00Z), a relative age (7d / 24h / 30m), "
             f"or a unix timestamp."
         )
@@ -194,6 +207,7 @@ def remember(
     memories: list[dict] | None = None,
     summary: str | None = None,
     idempotency_key: str | None = None,
+    created_at: str | None = None,
     ctx: Context = None,
 ) -> str:
     """Store one or more memories in persistent cognitive memory.
@@ -228,8 +242,38 @@ def remember(
             write; same key + different text is an error. Engine-embedder
             (bundled) backend only. On batch, the key scopes per item as
             "{key}:{index}" if the atomic batch path is unavailable.
+        created_at: v0.14 engine — BACKDATE the memory to when it was actually
+            true, not when you imported it. Use for backfill (chat logs,
+            migrations). Without it every imported memory stamps "now", which
+            makes temporal(action="as_of") report history that never happened
+            and flattens staleness/decay. Same formats as as_of:
+            "2026-08-01", "2026-08-01T14:30:00Z", "7d" (ago), or unix seconds.
+            Omit for anything learned in the present conversation.
     """
     db = _get_db(ctx)
+
+    # Backdating (v0.14 engine). Refused loudly rather than dropped on an
+    # engine that can't honour it: silently stamping "now" on a memory the
+    # caller explicitly dated would corrupt exactly the thing backdating
+    # exists to protect — temporal(action="as_of") would then report a
+    # history that never happened. Agreement #6.
+    created_at_ts = None
+    if created_at is not None:
+        created_at_ts = _parse_timestamp(created_at, field="created_at")
+        import inspect as _inspect
+
+        try:
+            _supported = "created_at" in _inspect.signature(db.record).parameters
+        except (ValueError, TypeError):
+            _supported = False
+        if not _supported:
+            return _err(
+                "created_at (backdating) needs engine v0.14+; this server runs an "
+                "older engine. Re-run without created_at to record at the current "
+                "time, or upgrade the engine — recording silently at 'now' would "
+                "make time-travel recall misreport when this was true.",
+                required_engine="0.14.0",
+            )
 
     # Draft mode (v0.8.0+) — engine atomizes a summary into linked facts
     if summary is not None:
@@ -261,6 +305,14 @@ def remember(
                 "source": mem.get("source", "user"),
                 "emotional_state": mem.get("emotional_state"),
             })
+            # Per-item backdating wins over the call-level default, so a
+            # single import can carry each memory's own original timestamp.
+            item_created = mem.get("created_at")
+            if item_created is not None:
+                inputs[-1]["created_at"] = _parse_timestamp(
+                    item_created, field=f"memories[{i}].created_at")
+            elif created_at_ts is not None:
+                inputs[-1]["created_at"] = created_at_ts
 
         # Prefer record_batch (v0.9.0+) for atomic batch insert; fall back to
         # loop on older engines OR HTTP backend that may not expose it.
@@ -299,6 +351,8 @@ def remember(
             )
             if idempotency_key:
                 item_kwargs["idempotency_key"] = f"{idempotency_key}:{i}"
+            if mem.get("created_at") is not None:
+                item_kwargs["created_at"] = mem["created_at"]
             try:
                 rid = db.record(mem["text"], **item_kwargs)
             except Exception as e:
@@ -339,6 +393,8 @@ def remember(
     )
     if idempotency_key:
         record_kwargs["idempotency_key"] = idempotency_key
+    if created_at_ts is not None:
+        record_kwargs["created_at"] = created_at_ts
     try:
         rid = db.record(text, **record_kwargs)
     except Exception as e:
@@ -505,6 +561,33 @@ def recall(
             "why_retrieved": r["why_retrieved"],
             "emotional_state": r.get("emotional_state"),
         }
+        # created_at — reported by yantrikdb-core 2026-08-12 as dropped by this
+        # projection, and it is the highest-value field we were discarding.
+        #
+        # recall ranks by SIMILARITY, not time. This same layer emits a hint
+        # saying exactly that ("for the exact latest entry use chain_head")
+        # while withholding the timestamps a caller needs to act on it — the
+        # ranking was both wrong AND unauditable. Core's measured case: rank 1
+        # was a March blob claiming "v0.1.0", rank 2 was that day's correct
+        # record. With dates visible the caller picks correctly DESPITE the
+        # imperfect ranking. One field turns an unrecoverable failure into a
+        # recoverable one.
+        #
+        # Emitted as ISO-8601 UTC rather than the raw float: "2026-03-14T…" is
+        # instantly comparable to "today" by a reader that does no arithmetic,
+        # which is the entire point. Raw epoch seconds are preserved alongside
+        # for callers doing real comparisons.
+        created = r.get("created_at")
+        if created is not None:
+            item["created_at"] = _iso_utc(created)
+            item["created_at_unix"] = round(float(created), 3)
+        # similarity — core's minimum ask for the scores breakdown. This is
+        # what actually EXPLAINS a ranking; `score` is the blended value, so
+        # two hits can share a score for entirely different reasons. Prose
+        # (why_retrieved) stays ALONGSIDE the numbers, never instead of them.
+        scores = r.get("scores") or {}
+        if "similarity" in scores:
+            item["similarity"] = round(scores["similarity"], 4)
         # A3: prune only the allowlisted safe null (emotional_state).
         items.append(_prune_nulls(item, _RECALL_PRUNABLE_NULLS))
     hints = [
@@ -1464,7 +1547,7 @@ def temporal(
                 "(note: that answers a different question).",
                 required_engine="0.12.0",
             )
-        ts = _parse_as_of(as_of)
+        ts = _parse_timestamp(as_of, field="as_of")
         rows = db.recall_as_of(ts, query=query, top_k=limit, namespace=namespace)
         return json.dumps({
             "as_of": as_of,
