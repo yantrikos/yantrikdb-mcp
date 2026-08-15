@@ -190,6 +190,13 @@ class HttpBackend:
                              expand_entities=True, namespace=None,
                              domain=None, source=None) -> dict:
         body: dict = {"query": query, "top_k": top_k}
+        # These two were accepted and silently dropped — recall(
+        # expand_entities=...) / include_consolidated=True did nothing on
+        # cluster while working embedded. Forward both; a server that
+        # ignores unknown body fields behaves exactly as before, one that
+        # honors them now honors the caller.
+        body["include_consolidated"] = include_consolidated
+        body["expand_entities"] = expand_entities
         if memory_type:
             body["memory_type"] = memory_type
         if namespace:
@@ -230,6 +237,13 @@ class HttpBackend:
         surfaces via the why_retrieved/superseded_by fields being absent
         rather than silently — the row shape itself is identical)."""
         body: dict = {"query": query, "top_k": top_k}
+        # These two were accepted and silently dropped — recall(
+        # expand_entities=...) / include_consolidated=True did nothing on
+        # cluster while working embedded. Forward both; a server that
+        # ignores unknown body fields behaves exactly as before, one that
+        # honors them now honors the caller.
+        body["include_consolidated"] = include_consolidated
+        body["expand_entities"] = expand_entities
         if memory_type:
             body["memory_type"] = memory_type
         if namespace:
@@ -281,12 +295,31 @@ class HttpBackend:
         return self._post("/v1/correct", body)
 
     def think(self, config=None) -> "ThinkResult":
+        # The config arrives as a plain DICT from tools.py. The old code did
+        # getattr() on it — which never finds dict keys — AND looked up
+        # "run_conflicts"/"run_patterns" where the dict carries
+        # "run_conflict_scan"/"run_pattern_mining". Net effect: EVERY
+        # restraint flag a caller passed was silently discarded and a
+        # cluster think() always ran full consolidation. Same incident shape
+        # as the maintenance dry_run: the caller's restraint dropped at a
+        # boundary that swallowed the difference.
         body = {}
         if config:
-            body["run_consolidation"] = getattr(config, "run_consolidation", True)
-            body["run_conflicts"] = getattr(config, "run_conflicts", True)
-            body["run_patterns"] = getattr(config, "run_patterns", True)
-            body["run_personality"] = getattr(config, "run_personality", True)
+            get = config.get if isinstance(config, dict) else (
+                lambda k, d=None: getattr(config, k, d))
+            for dict_key, wire_key in [
+                ("run_consolidation", "run_consolidation"),
+                ("run_conflict_scan", "run_conflicts"),
+                ("run_pattern_mining", "run_patterns"),
+                ("run_personality", "run_personality"),
+                ("consolidation_limit", "consolidation_limit"),
+                ("consolidation_time_window_days", "consolidation_time_window_days"),
+                ("min_active_memories", "min_active_memories"),
+                ("max_triggers", "max_triggers"),
+            ]:
+                v = get(dict_key)
+                if v is not None:
+                    body[wire_key] = v
         result = self._post("/v1/think", body)
         return _ThinkResult(result)
 
@@ -384,10 +417,14 @@ class HttpBackend:
         return _Stats(result)
 
     def get(self, rid: str):
-        """Get a single memory by RID — returns None-like if not found."""
-        # The server doesn't have a direct GET-by-RID endpoint;
-        # recall with exact text isn't feasible. Return a stub.
-        return None
+        """Get a single memory by RID."""
+        # Was a stub returning None — every rid then reported "Memory not
+        # found", blaming the rid instead of the backend, and
+        # update_importance (which pre-reads) failed with the same lie.
+        raise RemoteUnsupportedError(
+            "get-by-rid is not exposed by the HTTP API yet; this is a "
+            "backend limitation, not a missing memory."
+        )
 
     def get_beliefs_above(self, min_confidence: float) -> list:
         return []
@@ -397,15 +434,33 @@ class HttpBackend:
 
     def recall_feedback(self, *, rid, feedback, query_text=None,
                         score_at_retrieval=None, rank_at_retrieval=None):
-        pass  # Not exposed via HTTP API yet
+        # Was `pass` — tools.py then reported {"status": "recorded"}: a
+        # false receipt for a write into the void, and the retrieval-tuning
+        # loop silently never learned on cluster. Absent beats
+        # advertised-but-inert (agreement #6).
+        raise RemoteUnsupportedError(
+            "recall_feedback is not exposed by the HTTP API yet; feedback "
+            "was NOT recorded. Run against an embedded engine to tune "
+            "retrieval, or upgrade the server when the endpoint ships."
+        )
 
     def recall_refine(self, *, original_query_embedding, refinement_text,
                       original_rids, top_k, namespace=None, domain=None, source=None):
-        # Fall back to regular recall
-        return self.recall_with_response(
-            query=refinement_text, top_k=top_k,
+        # Degraded refine: no server endpoint yet, so this is a plain recall
+        # — but the ONE thing refine promises its caller is "not the hits I
+        # just rejected", and the old fallback returned exactly those. Over-
+        # fetch and filter the excluded rids client-side; the embedding-space
+        # refinement math stays unavailable until the endpoint ships.
+        excluded = set(original_rids or [])
+        result = self.recall_with_response(
+            query=refinement_text, top_k=top_k + len(excluded),
             namespace=namespace, domain=domain, source=source,
         )
+        if excluded and isinstance(result, dict):
+            kept = [r for r in result.get("results", [])
+                    if r.get("rid") not in excluded]
+            result["results"] = kept[:top_k]
+        return result
 
     def embed(self, text: str):
         return None  # Not needed for HTTP backend recall_refine fallback

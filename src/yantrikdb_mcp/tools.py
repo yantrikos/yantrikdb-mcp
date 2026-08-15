@@ -314,9 +314,36 @@ def remember(
             elif created_at_ts is not None:
                 inputs[-1]["created_at"] = created_at_ts
 
-        # Prefer record_batch (v0.9.0+) for atomic batch insert; fall back to
-        # loop on older engines OR HTTP backend that may not expose it.
-        if hasattr(db, "record_batch"):
+        # A KEYED batch must not take the record_batch happy path: the
+        # engine requires caller-supplied embeddings for keyed batch items
+        # (the digest includes the vector), and the old code silently
+        # dropped the keys here — so the documented "{key}:{index}"
+        # exactly-once contract held ONLY on the fallback loop, and a
+        # retried batch double-wrote every item on the common path. The
+        # per-item loop below (engine-embedded keyed writes) IS the
+        # correct keyed path.
+        #
+        # Same rule for per-item created_at on backends whose record()
+        # cannot honor it: single-mode refuses loudly (the v0.14 guard);
+        # letting batch items slip through would stamp "now" on backfilled
+        # history — precisely the corruption that guard exists to refuse.
+        import inspect as _inspect
+
+        try:
+            _rec_takes_created_at = (
+                "created_at" in _inspect.signature(db.record).parameters
+            )
+        except (ValueError, TypeError):
+            _rec_takes_created_at = False
+        batch_has_created_at = any(m.get("created_at") is not None for m in inputs)
+        if batch_has_created_at and not _rec_takes_created_at:
+            raise ToolError(
+                "memories[].created_at requires an engine/backend whose "
+                "record() accepts created_at (engine >= 0.14 embedded); "
+                "this backend would silently stamp 'now' on backfilled "
+                "history. Remove per-item created_at or upgrade."
+            )
+        if hasattr(db, "record_batch") and not idempotency_key:
             try:
                 results = db.record_batch(inputs)
                 if isinstance(results, list):
@@ -714,7 +741,7 @@ def think(
     consolidation_limit: int = 5,
     maintenance_cycle: bool = False,
     last_cycle_only: bool = False,
-    dry_run: bool = True,
+    dry_run: bool | None = None,
     burn_down_conflicts: bool = True,
     prune_triggers_too: bool = True,
     max_pending_triggers: int = 64,
@@ -787,6 +814,22 @@ def think(
         return json.dumps({"last_maintenance_cycle": last})
 
     # Full v0.9.0 maintenance cycle
+    # dry_run semantics after the 2026-08-15 incident: None (the default)
+    # means "preview" for the maintenance cycle — the safe default — and is
+    # simply absent for incremental think, which has no dry form. An
+    # EXPLICIT dry_run=True on an incremental think is a caller who believes
+    # they are previewing a pass that would actually mutate (consolidation
+    # merges, conflict scan writes rows): refuse loudly, never run wet
+    # under a preview-shaped call.
+    if dry_run is True and not maintenance_cycle and not last_cycle_only and not maintenance_op:
+        raise ToolError(
+            "dry_run applies only to maintenance_cycle=True. A plain think() "
+            "pass has no dry form (consolidation and conflict scanning both "
+            "write). Call think(maintenance_cycle=True, dry_run=True) for a "
+            "preview, or omit dry_run to acknowledge the mutation."
+        )
+    effective_dry = True if dry_run is None else dry_run
+
     if maintenance_cycle:
         result = db.run_maintenance_cycle(
             run_think=run_consolidation,
@@ -800,6 +843,15 @@ def think(
             split_oversized=split_oversized,
             split_min_chars=split_min_chars,
             repair_artifacts=repair_artifacts,
+            # THE 2026-08-15 INCIDENT LINE. This parameter was accepted,
+            # documented ("preview without persisting"), defaulted True — and
+            # never passed. A "dry" call auto-resolved 15 conflicts and
+            # tombstoned 13 live records on the production store (restored
+            # same day, metadata.restored_from). Requires engine >= the build
+            # carrying MaintenanceCycleConfig.dry_run; older engines raise
+            # TypeError here rather than silently running wet, which is the
+            # correct failure.
+            dry_run=effective_dry,
         )
         return json.dumps({"maintenance_cycle": result if isinstance(result, dict) else {"result": result}})
 
@@ -1027,7 +1079,7 @@ def graph(
     # v0.9.0: record-to-record link primitives + auto_relate
     source_rid: str | None = None,
     target_rid: str | None = None,
-    link_type: str = "related_to",
+    link_type: str | None = None,
     direction: str = "both",
     dry_run: bool = True,
     max_edges: int = 500,
@@ -1125,16 +1177,19 @@ def graph(
     if action == "record_link":
         if not source_rid or not target_rid:
             raise ToolError("source_rid and target_rid required for record_link")
-        link_id = db.link(source_rid, target_rid, link_type)
+        # Creation keeps its default; None here means "unspecified", which
+        # for a CREATE is related_to (the old param-level default).
+        eff_link_type = link_type or "related_to"
+        link_id = db.link(source_rid, target_rid, eff_link_type)
         return json.dumps({
             "link_id": link_id, "source_rid": source_rid,
-            "target_rid": target_rid, "link_type": link_type,
+            "target_rid": target_rid, "link_type": eff_link_type,
         })
 
     if action == "record_unlink":
         if not source_rid or not target_rid:
             raise ToolError("source_rid and target_rid required for record_unlink")
-        removed = db.unlink(source_rid, target_rid, link_type)
+        removed = db.unlink(source_rid, target_rid, link_type or "related_to")
         return json.dumps({"removed": removed})
 
     if action == "linked_records":
@@ -1142,7 +1197,11 @@ def graph(
             raise ToolError("rid required for linked_records")
         if direction not in ("outbound", "inbound", "both"):
             raise ToolError("direction must be 'outbound', 'inbound', or 'both'")
-        rows = db.linked_records(rid, direction=direction, link_type=(link_type if link_type != "related_to" else None))
+        # Filter semantics fixed: None = all types; an EXPLICIT value —
+        # including "related_to", the most common type and previously
+        # indistinguishable from the default and silently unfiltered —
+        # now actually filters.
+        rows = db.linked_records(rid, direction=direction, link_type=link_type)
         return json.dumps({"rid": rid, "direction": direction, "count": len(rows or []), "linked": rows or []})
 
     if action == "recall_with_links":
@@ -1293,6 +1352,12 @@ def trigger(
 
     if action == "pending":
         trigger_list = db.get_pending_triggers(limit=limit)
+        # The docstring promises trigger_type filters pending too (history
+        # already passes it); pending silently ignored it. Filter here —
+        # client-side, so older engines behave identically.
+        if trigger_type:
+            trigger_list = [t for t in trigger_list
+                            if t.get("trigger_type") == trigger_type]
         items = [
             {"trigger_id": t["trigger_id"], "trigger_type": t["trigger_type"],
              "urgency": t.get("urgency"), "reason": t.get("reason"),
@@ -1875,7 +1940,7 @@ def skill(
     action: str,
     skill_id: str | None = None,
     body: str | None = None,
-    skill_type: str = "procedure",
+    skill_type: str | None = None,
     applies_to: list[str] | None = None,
     triggers: list[str] | None = None,
     on_conflict: str = "reject",
@@ -2018,6 +2083,11 @@ def skill(
         # namespace, then content scanning (A1-A5), then B4 supersedes,
         # then existence/conflict (which requires DB I/O).
         try:
+            # Define keeps its old default; None means "unspecified", which
+            # for a DEFINE is procedure. The param-level default previously
+            # leaked into surface/list, where an EXPLICIT procedure filter
+            # was indistinguishable from the default and silently disabled.
+            skill_type = skill_type or "procedure"
             validate_skill_define_args(skill_id or "", body or "", skill_type, applies_to)
         except ValueError as e:
             COUNTERS.reject_define("schema")
@@ -2183,7 +2253,7 @@ def skill(
             raise ToolError("query required for action='surface'")
         if applies_to is not None and not isinstance(applies_to, list):
             raise ToolError("applies_to must be a list")
-        if skill_type and skill_type != "procedure" and skill_type not in SKILL_TYPES:
+        if skill_type and skill_type not in SKILL_TYPES:
             raise ToolError(f"skill_type {skill_type!r} not in {sorted(SKILL_TYPES)}")
 
         # Reads only see the LIVE catalog, never the pending-review queue.
@@ -2217,7 +2287,7 @@ def skill(
                 skill_applies = set(meta.get("applies_to") or [])
                 if not (set(applies_to) & skill_applies):
                     continue
-            if skill_type and skill_type != "procedure":
+            if skill_type:
                 if meta.get("skill_type") != skill_type:
                     continue
             items.append({
@@ -2365,7 +2435,7 @@ def skill(
                 skill_applies = set(meta.get("applies_to") or [])
                 if not (set(applies_to) & skill_applies):
                     continue
-            if skill_type and skill_type != "procedure":
+            if skill_type:
                 if meta.get("skill_type") != skill_type:
                     continue
             items.append({
@@ -2477,7 +2547,7 @@ def task(
     action: str,
     namespace: str = "default",
     title: str | None = None,
-    priority: str = "medium",
+    priority: str | None = None,
     parent_id: str | None = None,
     task_id: str | None = None,
     status: str | None = None,
@@ -2515,8 +2585,13 @@ def task(
     if action == "add":
         if not title or not title.strip():
             raise ToolError("title required for action='add'")
-        tid = db.task_add(namespace, title.strip(), priority=priority, parent_id=parent_id)
-        return json.dumps({"task_id": tid, "title": title.strip(), "priority": priority})
+        # priority defaults at the ADD site now. The old param-level
+        # default "medium" leaked into action="update": updating only
+        # status silently RESET a high/low task to medium — a field the
+        # caller never passed, mutated.
+        eff_priority = priority or "medium"
+        tid = db.task_add(namespace, title.strip(), priority=eff_priority, parent_id=parent_id)
+        return json.dumps({"task_id": tid, "title": title.strip(), "priority": eff_priority})
 
     if action == "get":
         if not task_id:
