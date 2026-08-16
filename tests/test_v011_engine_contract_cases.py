@@ -212,5 +212,12 @@ def test_embedder_identity_is_adopted_lazily(eng):
     d.adopt_embedder_identity()
     ident = d.embedder_identity()
     assert set(("name", "digest", "dim")).issubset(ident.keys())
-    assert ident["digest"].startswith("blake3:"), "embedder identity is digest-anchored"
+    # Digest-anchored, algorithm-agnostic: engine 0.14.1 anchored the
+    # bundled embedder with blake3:, the 256-dim default (0.15 line)
+    # anchors with sha256:. Pack seal/mount compares full digest STRINGS,
+    # never prefixes, so pinning the algorithm here tested an
+    # implementation detail and broke on the first legitimate change.
+    algo, _, hexdigest = ident["digest"].partition(":")
+    assert algo and hexdigest, "embedder identity is digest-anchored (algo:hex)"
+    assert all(c in "0123456789abcdef" for c in hexdigest), "digest payload is hex"
     assert isinstance(ident["dim"], int) and ident["dim"] > 0
