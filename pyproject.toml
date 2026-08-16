@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "yantrikdb-mcp"
-version = "0.17.0"
+version = "0.18.0"
 description = "YantrikDB — Cognitive memory for AI agents. Persistent semantic recall, knowledge graph, contradiction detection, and procedural learning. Ships as embeddable engine, network database, or MCP server."
 readme = "README.md"
 license = "MIT"
@@ -116,7 +116,14 @@ dependencies = [
     # Ranking DOES move — that is the point — so the floor is safe here only
     # because our cases gate on feature probes, never on golden orderings
     # (265 passed unchanged against 0.14.1).
-    "yantrikdb>=0.14.1,<0.15.0",
+    # v0.18.0 REQUIRES >=0.15.0: think(maintenance_cycle, dry_run) now
+    # forwards dry_run to the binding, and pre-0.15 engines have no such
+    # parameter — the call raises TypeError there BY DESIGN (a "preview"
+    # must never silently run wet; that exact incident tombstoned 13 live
+    # records on the production store). The recall/think field forwarding
+    # in this release likewise lands on an engine that actually reads the
+    # fields. 266 passed against the published 0.15.0 wheel.
+    "yantrikdb>=0.15.0,<0.16.0",
     # D3 firewall, same rule as the engine pin above — and for the same
     # reason, learned the same way. `mcp[cli]>=1.2.0` was UNBOUNDED, so the
     # day the SDK shipped 2.0.0 it removed `mcp.server.fastmcp` and every
