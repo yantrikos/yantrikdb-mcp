@@ -73,7 +73,13 @@ FULL_TOOLS = CORE_TOOLS | {
 #     diff that looked fine locally (exactly what happened here).
 #     Follow-up worth doing: measure per-interpreter rather than assuming one
 #     number fits all, so this ceiling stops drifting with the Python matrix.
-SCHEMA_BUDGET_CHARS = 46_800
+#
+# (3) v0.18.0 lands at 46,812 on py3.10/3.12 (over by 12): the chars are the
+#     honest-refusal descriptions on get-by-rid and recall_feedback — the
+#     tools that previously returned "Memory not found" / a false "recorded"
+#     receipt for backend gaps. A description that stops an agent from
+#     retrying a rid that was never the problem earns its 12 chars.
+SCHEMA_BUDGET_CHARS = 46_900
 
 
 def _rpc(proc, method, params, mid):
