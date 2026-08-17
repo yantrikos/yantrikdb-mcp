@@ -79,7 +79,17 @@ FULL_TOOLS = CORE_TOOLS | {
 #     tools that previously returned "Memory not found" / a false "recorded"
 #     receipt for backend gaps. A description that stops an agent from
 #     retrying a rid that was never the problem earns its 12 chars.
-SCHEMA_BUDGET_CHARS = 46_900
+#
+# 46_900 -> 48_600 (REVIEWED): time-window retrieval — recall gains
+#     since/until and temporal gains "range" (+ its since/until). Measured
+#     48,342 on py3.12 after prose trims; the residual is four `str | None`
+#     params (fat anyOf renders on py3.10/3.12) plus the routing sentences.
+#     Those sentences ARE the fix: the live failure was recall answering
+#     "in what order did tonight's releases ship" with six-month-old
+#     keyword matches while six in-window memories retrieved zero — an
+#     agent that is never told period questions route to range/since-until
+#     re-creates that failure on every deictic query it makes.
+SCHEMA_BUDGET_CHARS = 48_600
 
 
 def _rpc(proc, method, params, mid):

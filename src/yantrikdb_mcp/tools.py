@@ -448,6 +448,8 @@ def recall(
     include_superseded: bool = False,
     expand_entities: bool = True,
     min_score_ratio: float | None = None,
+    since: str | None = None,
+    until: str | None = None,
     refine_from: str | None = None,
     refine_exclude: list[str] | None = None,
     ctx: Context = None,
@@ -467,6 +469,9 @@ def recall(
     memory(action="feedback", rid=..., feedback="relevant").
     For "what is the CURRENT/latest X", prefer memory(action="chain_head") —
     similarity favors the most-similar revision, not the newest.
+    For "what happened <period>, in what order" ("tonight", "this week")
+    use temporal(action="range") or since/until here — those words name the
+    time frame, not the content; bare similarity cannot see the window.
 
     QUERY: one short natural-language sentence (5-10 words), NOT a keyword
     list — keyword stuffing degrades quality. One focused question per call;
@@ -493,10 +498,36 @@ def recall(
             (0.8 = keep only near-as-good matches). Semantic search always
             returns top_k, even when one result is relevant and the rest are
             noise; this trims the tail instead of making you judge it.
+        since: Only memories from this instant on — "2026-08-01",
+            "2026-08-01T14:30:00Z", "6h"/"7d" (ago), or unix seconds.
+            Filters BEFORE ranking: top_k is chosen inside the window.
+        until: Window end (same formats; default now). Alone = up to then.
         refine_from: Original query text to refine from. query becomes the refinement.
         refine_exclude: Memory IDs to exclude when refining.
     """
     db = _get_db(ctx)
+
+    # Time window, parsed up front so a bad instant fails loudly before any
+    # engine call. The probe that motivated this: recall("in what order did
+    # tonight's releases ship") returned six-month-old records while six
+    # in-window memories written hours earlier scored zero — and passing
+    # since/until to the old schema was SILENTLY DROPPED by validation, the
+    # worst of the three behaviors (honored > rejected > swallowed).
+    time_window: tuple[float, float] | None = None
+    if since is not None or until is not None:
+        ts_since = _parse_timestamp(since, field="since") if since is not None else 0.0
+        ts_until = _parse_timestamp(until, field="until") if until is not None else time.time()
+        if ts_since >= ts_until:
+            raise ToolError(
+                f"empty time window: since ({_iso_utc(ts_since)}) is not before "
+                f"until ({_iso_utc(ts_until)})"
+            )
+        if refine_from:
+            # recall_refine has no time-window path in the engine; advertising
+            # the combination and ignoring half of it would repeat the exact
+            # silent-drop failure this parameter exists to fix.
+            raise ToolError("since/until cannot be combined with refine_from — refine has no time-window support")
+        time_window = (ts_since, ts_until)
 
     # Pre-v0.10 feedback calls used query="" with feedback_rid — that param
     # moved to memory(action="feedback") and schema validation now drops it,
@@ -540,6 +571,7 @@ def recall(
             expand_entities=expand_entities,
             namespace=namespace, domain=domain, source=source,
             include_superseded=True,
+            time_window=time_window,
         )
         response = {
             "results": rows or [],
@@ -551,6 +583,7 @@ def recall(
             query=query, top_k=top_k, memory_type=memory_type,
             include_consolidated=include_consolidated, expand_entities=expand_entities,
             namespace=namespace, domain=domain, source=source,
+            time_window=time_window,
         )
     # Relative score cutoff, applied CLIENT-SIDE on purpose.
     #
@@ -626,6 +659,12 @@ def recall(
         "confidence": round(response["confidence"], 4),
         "hints": hints,
     }
+    if time_window is not None:
+        # Echoed so the caller can SEE the filter was applied — the failure
+        # mode this replaces was a window silently ignored, which is
+        # indistinguishable from a window honored over a dense corpus.
+        out["time_window"] = {"since": _iso_utc(time_window[0]),
+                              "until": _iso_utc(time_window[1])}
     # Say so when the cutoff dropped hits. Otherwise a filtered result reads
     # like "the substrate barely knows this", and the agent's next move is a
     # broader re-query it doesn't need — or a wrong conclusion about coverage.
@@ -1570,29 +1609,121 @@ def temporal(
     namespace: str | None = None,
     query: str | None = None,
     as_of: str | None = None,
+    since: str | None = None,
+    until: str | None = None,
     ctx: Context = None,
 ) -> str:
-    """Find stale or upcoming memories, or recall the past as it was known.
+    """Find stale or upcoming memories, recall the past, or scan a time window.
 
     ACTIONS:
     - "stale": Important memories not accessed recently.
     - "upcoming": Memories with approaching deadlines/events.
     - "as_of": Time-travel recall — excludes anything recorded after `as_of`,
                so you see the belief held then, not today's. Engine v0.12+.
+    - "range": Everything in a time window, oldest first — the surface for
+               "what happened tonight / this week, in what order". Period
+               and sequence questions are SET queries over a window;
+               similarity search cannot answer them — route them here.
 
     Args:
-        action: "stale", "upcoming", or "as_of".
+        action: "stale", "upcoming", "as_of", or "range".
         days: Inactivity threshold (stale) or look-ahead window (upcoming).
         limit: Max results.
         namespace: Optional filter.
-        query: Search text (required for "as_of").
+        query: Search text (required for "as_of"; optional for "range":
+               given = relevance-selected within the window, omitted =
+               the window's newest `limit` records).
         as_of: Past instant (required for "as_of"): "2026-08-01",
                "2026-08-01T14:30:00Z", "7d"/"24h" (ago), or unix seconds.
+        since: Window start (required for "range"), same formats as as_of.
+        until: Window end for "range" — defaults to now.
     """
-    if action not in ("stale", "upcoming", "as_of"):
-        raise ToolError("action must be 'stale', 'upcoming', or 'as_of'")
+    if action not in ("stale", "upcoming", "as_of", "range"):
+        raise ToolError("action must be 'stale', 'upcoming', 'as_of', or 'range'")
 
     db = _get_db(ctx)
+
+    if action == "range":
+        if not since:
+            raise ToolError(
+                'range requires `since` — the window start (e.g. "6h", '
+                '"2026-08-16", "2026-08-16T00:00:00Z", or unix seconds)'
+            )
+        ts_since = _parse_timestamp(since, field="since")
+        ts_until = _parse_timestamp(until, field="until") if until else time.time()
+        if ts_since >= ts_until:
+            raise ToolError(
+                f"empty time window: since ({_iso_utc(ts_since)}) is not before "
+                f"until ({_iso_utc(ts_until)})"
+            )
+        if query and query.strip():
+            # Relevance decides WHICH `limit` records when the window holds
+            # more than fit; the window decides the candidate set; time
+            # decides presentation. All three roles stated in the output.
+            rows = db.recall(
+                query=query, top_k=limit, namespace=namespace,
+                time_window=(ts_since, ts_until),
+            ) or []
+            selection = "relevance-selected within the window"
+        else:
+            # Pure window scan: page the created_at-descending listing and
+            # stop at the first record older than the window. Newest `limit`
+            # kept — for a window smaller than `limit` that is the complete
+            # window.
+            rows, truncated, scan_offset = [], False, 0
+            batch = 200
+            while True:
+                try:
+                    page = db.list_memories(limit=batch, offset=scan_offset,
+                                            namespace=namespace, sort_by="created_at")
+                except NotImplementedError:
+                    # HTTP cluster mode has no listing endpoint yet. Refuse
+                    # with the working alternative rather than half-answer.
+                    raise ToolError(
+                        "range without `query` needs a listing scan, which the "
+                        "HTTP cluster transport does not support yet — pass a "
+                        "`query` (relevance-selected within the window) or run "
+                        "in embedded mode."
+                    )
+                mems = page.get("memories") or []
+                if not mems:
+                    break
+                older_reached = False
+                for m in mems:
+                    ca = float(m.get("created_at") or 0.0)
+                    if ca > ts_until:
+                        continue
+                    if ca < ts_since:
+                        older_reached = True
+                        break
+                    if len(rows) >= limit:
+                        truncated = True
+                        older_reached = True
+                        break
+                    rows.append(m)
+                if older_reached:
+                    break
+                scan_offset += batch
+                if scan_offset >= page.get("total", 0):
+                    break
+            selection = ("newest %d of a larger window — narrow the window or raise limit"
+                         % limit) if truncated else "complete window"
+        rows = sorted(rows, key=lambda m: float(m.get("created_at") or 0.0))
+        return json.dumps({
+            "since": _iso_utc(ts_since),
+            "until": _iso_utc(ts_until),
+            "count": len(rows),
+            "order": "chronological (oldest first)",
+            "selection": selection,
+            "results": [
+                {"rid": m.get("rid"), "text": m.get("text"),
+                 "type": m.get("type"),
+                 "importance": round(float(m.get("importance") or 0.0), _FLOAT_ROUND_PLACES),
+                 "created_at": _iso_utc(m["created_at"]) if m.get("created_at") else None,
+                 "created_at_unix": round(float(m.get("created_at") or 0.0), 3)}
+                for m in rows if isinstance(m, dict)
+            ],
+        })
 
     if action == "as_of":
         if not query or not query.strip():
