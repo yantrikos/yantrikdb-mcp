@@ -19,6 +19,22 @@ import requests
 log = logging.getLogger("yantrikdb.mcp.http")
 
 
+def _within(created_at, window: tuple) -> bool:
+    """True when a row's created_at falls inside [since, until].
+
+    A row with NO created_at fails the window: for a time-window query,
+    "recorded at an unknown time" is not "recorded inside the window", and
+    admitting it would smuggle unfiltered rows past the filter.
+    """
+    if created_at is None:
+        return False
+    try:
+        ts = float(created_at)
+    except (TypeError, ValueError):
+        return False
+    return window[0] <= ts <= window[1]
+
+
 class RemoteUnsupportedError(NotImplementedError):
     """Raised when a method is not yet exposed over the HTTP transport.
 
@@ -188,7 +204,8 @@ class HttpBackend:
     def recall_with_response(self, *, query: str, top_k: int = 10,
                              memory_type=None, include_consolidated=False,
                              expand_entities=True, namespace=None,
-                             domain=None, source=None) -> dict:
+                             domain=None, source=None,
+                             time_window: tuple | None = None) -> dict:
         body: dict = {"query": query, "top_k": top_k}
         # These two were accepted and silently dropped — recall(
         # expand_entities=...) / include_consolidated=True did nothing on
@@ -205,10 +222,21 @@ class HttpBackend:
             body["domain"] = domain
         if source:
             body["source"] = source
+        if time_window:
+            # Forwarded for servers that will honor it; POST-FILTERED below
+            # for those that don't, because a window silently unapplied
+            # returns out-of-window rows as if they were in-window — the
+            # exact failure the parameter exists to fix. Until the server
+            # wires it, cluster callers get reduced in-window depth (the
+            # top_k is relevance-picked before the client filter), never
+            # wrong rows.
+            body["time_window"] = [time_window[0], time_window[1]]
         result = self._post("/v1/recall", body)
         # Adapt server response to match embedded engine format
         items = []
         for r in result.get("results", []):
+            if time_window and not _within(r.get("created_at"), time_window):
+                continue
             items.append({
                 "rid": r.get("rid", ""),
                 "text": r.get("text", ""),
@@ -229,7 +257,8 @@ class HttpBackend:
     def recall(self, *, query: str, top_k: int = 10, memory_type=None,
                include_consolidated=False, expand_entities=True,
                namespace=None, domain=None, source=None,
-               include_superseded: bool = False, **_kw) -> list:
+               include_superseded: bool = False,
+               time_window: tuple | None = None, **_kw) -> list:
         """Row-level recall (embedded `db.recall` parity) — used by the
         tool layer's include_superseded archaeology path. Forwards
         include_superseded to /v1/recall (yantrikdb-server wires the param
@@ -254,9 +283,16 @@ class HttpBackend:
             body["source"] = source
         if include_superseded:
             body["include_superseded"] = True
+        if time_window:
+            # Same forward-plus-post-filter contract as recall_with_response
+            # (see the comment there). This param must NOT fall into **_kw:
+            # a swallowed window returns out-of-window rows as in-window.
+            body["time_window"] = [time_window[0], time_window[1]]
         result = self._post("/v1/recall", body)
         rows = []
         for r in result.get("results", []):
+            if time_window and not _within(r.get("created_at"), time_window):
+                continue
             rows.append({
                 "rid": r.get("rid", ""),
                 "text": r.get("text", ""),
