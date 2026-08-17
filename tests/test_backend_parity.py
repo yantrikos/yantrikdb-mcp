@@ -83,6 +83,19 @@ def _extract_db_method_calls(tools_src: str) -> set[str]:
     return methods
 
 
+# Methods tools.py invokes ONLY behind a `hasattr(db, ...)` probe, where
+# ABSENCE is the graceful-degradation contract (the caller no-ops, it never
+# AttributeErrors). Defining these on HttpBackend — even as a
+# RemoteUnsupportedError stub — would pass the hasattr probe and defeat the
+# degradation. Each entry must name the guard site.
+HASATTR_GUARDED = {
+    # tools._maintenance_debt(): opportunistic debt read for the
+    # remember/recall/think surfacing; no /v1 endpoint yet (future:
+    # GET /v1/maintenance/debt). See the comment block in http_backend.py.
+    "maintenance_debt",
+}
+
+
 def test_http_backend_covers_every_tools_method() -> None:
     """v0.5.0 regression class — `tools.py` called `db.get_conflict()`
     but HttpBackend didn't define it, so users hit raw AttributeError."""
@@ -90,6 +103,7 @@ def test_http_backend_covers_every_tools_method() -> None:
     HttpBackend = hb.HttpBackend  # noqa: N806
 
     expected = _extract_db_method_calls(TOOLS_PATH.read_text(encoding="utf-8"))
+    expected -= HASATTR_GUARDED
     actual = {
         n for n in dir(HttpBackend)
         if not n.startswith("_") and callable(getattr(HttpBackend, n))
@@ -101,6 +115,16 @@ def test_http_backend_covers_every_tools_method() -> None:
         f"calls on the db object — users in remote-cluster mode would "
         f"hit AttributeError. Add real impls or RemoteUnsupportedError "
         f"stubs for: {sorted(missing)}"
+    )
+
+    # Keep the exemption list honest: the moment one of these lands on
+    # HttpBackend for real (endpoint shipped), it must leave HASATTR_GUARDED
+    # so the parity gate covers it again.
+    stale_exemptions = HASATTR_GUARDED & actual
+    assert not stale_exemptions, (
+        f"{sorted(stale_exemptions)} are defined on HttpBackend but still "
+        f"listed in HASATTR_GUARDED — remove them from the exemption list "
+        f"(and note: a raising stub here would defeat the hasattr no-op)."
     )
 
 
