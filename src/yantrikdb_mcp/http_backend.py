@@ -843,6 +843,16 @@ class HttpBackend:
             body["domain"] = domain
         return self._post("/v1/session/end", body)
 
+    # ── maintenance_debt: DELIBERATELY ABSENT, not a raising stub ────
+    # The tool layer probes `hasattr(db, "maintenance_debt")` before every
+    # opportunistic debt read (remember/recall/think surfacing) and silently
+    # no-ops when the method is missing — absence IS the graceful-degradation
+    # contract. A RemoteUnsupportedError stub here would pass the hasattr
+    # probe and turn every write into a raise-and-swallow. Future server
+    # endpoint: GET /v1/maintenance/debt — implement it as a real method
+    # (never a fake returning zeros: fabricated "no debt" would suppress
+    # nudges on a cluster that genuinely needs a think pass).
+
     # ── operator/admin surface (MASTER token, server v0.8.27+) ──────
 
     def maintenance_run(self, *, tenant=None, split_oversized=False,

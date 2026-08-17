@@ -189,6 +189,137 @@ def _prune_nulls(d: dict, keys: tuple[str, ...]) -> dict:
 _RECALL_PRUNABLE_NULLS = ("emotional_state",)
 
 
+# ── maintenance-debt surfacing ──
+# In a reactive deployment the calling LLM is the only scheduler there is:
+# nothing else will ever run think(). Waiting to be ASKED about maintenance
+# debt means it is never seen, so the debt is surfaced inside tool responses
+# — the one guaranteed channel. DATA plus a suggestion, no urgency prose:
+# a measured experiment showed authority-flavored header text flips agent
+# behavior sideways; flat facts land, exhortation backfires.
+#
+# Contract: engine `db.maintenance_debt()` -> {writes_since_think: int,
+# last_think_at: float|None, open_conflicts: int, pending_triggers: int}.
+# hasattr-guarded: on an engine (or the HTTP backend) without the method,
+# ALL of this silently no-ops — graceful degradation, no pin bump.
+#
+# Module-level state is per-PROCESS. In stdio mode that is one session per
+# process, exactly the scope we want. In stateless streamable-http mode a
+# process serves per-connection state — a nudge may re-fire once per fresh
+# connection, which is acceptable (the debt is real either way).
+_NUDGE_STATE = {
+    # armed=True: the next threshold crossing surfaces immediately.
+    "armed": True,
+    # over-threshold remembers since the last surfaced nudge.
+    "since_last": 0,
+    # last open_conflicts value surfaced through ANY response (recall delta
+    # or think's post-run debt). Starts at 0 so a quiet store stays quiet;
+    # a transition back TO 0 still surfaces (the agent saw a nonzero).
+    "conflicts_surfaced": 0,
+}
+
+
+def _int_env(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        log.warning("%s=%r is not an int — using %d", name, raw, default)
+        return default
+
+
+def _maintenance_debt(db) -> dict | None:
+    """Best-effort read of the engine's maintenance-debt counters.
+
+    Returns None when the running engine predates the method (the entire
+    feature then no-ops) or when the probe itself fails — surfacing is
+    opportunistic and must never fail the call it rides on.
+    """
+    if not hasattr(db, "maintenance_debt"):
+        return None
+    try:
+        debt = db.maintenance_debt()
+    except Exception as e:  # noqa: BLE001 — a debt probe must not fail a write
+        log.debug("maintenance_debt() probe failed: %s: %s", type(e).__name__, e)
+        return None
+    return debt if isinstance(debt, dict) else None
+
+
+def _attach_write_debt(db, payload: dict) -> dict:
+    """After a successful remember(): attach a `maintenance` object when
+    write debt has crossed the nudge threshold.
+
+    Rate limit (in-process): surface on the FIRST crossing, then at most
+    every YANTRIKDB_THINK_NUDGE_EVERY subsequent remembers (default 10)
+    while still over threshold. Dropping below threshold — or a completed
+    think() — rearms the first-crossing nudge.
+    """
+    threshold = _int_env("YANTRIKDB_THINK_NUDGE_THRESHOLD", 50)
+    if threshold <= 0:  # 0 disables
+        return payload
+    debt = _maintenance_debt(db)
+    if debt is None:
+        return payload
+    writes = debt.get("writes_since_think")
+    if not isinstance(writes, int) or writes < threshold:
+        # Below threshold: rearm so the next crossing surfaces immediately.
+        _NUDGE_STATE["armed"] = True
+        _NUDGE_STATE["since_last"] = 0
+        return payload
+    if _NUDGE_STATE["armed"]:
+        fire = True
+    else:
+        _NUDGE_STATE["since_last"] += 1
+        fire = _NUDGE_STATE["since_last"] >= max(1, _int_env("YANTRIKDB_THINK_NUDGE_EVERY", 10))
+    if fire:
+        _NUDGE_STATE["armed"] = False
+        _NUDGE_STATE["since_last"] = 0
+        payload["maintenance"] = {
+            "writes_since_think": writes,
+            "last_think_at": debt.get("last_think_at"),
+            "open_conflicts": debt.get("open_conflicts"),
+            "suggest": "think()",
+        }
+    return payload
+
+
+def _attach_conflict_delta(db, payload: dict) -> dict:
+    """Recall metadata: surface `open_conflicts` ONLY when the count differs
+    from the last value this process surfaced (including transitions to 0).
+    Top-level metadata, never per-result, never prose."""
+    debt = _maintenance_debt(db)
+    if debt is None:
+        return payload
+    oc = debt.get("open_conflicts")
+    if isinstance(oc, int) and oc != _NUDGE_STATE["conflicts_surfaced"]:
+        payload["open_conflicts"] = oc
+        _NUDGE_STATE["conflicts_surfaced"] = oc
+    return payload
+
+
+def _refresh_after_think(db, payload: dict) -> dict:
+    """After a completed think/maintenance pass: rearm the write-debt nudge
+    (the pass is the very thing the nudge asks for) and include the POST-run
+    debt so the caller sees the debt actually cleared — a nudge whose effect
+    is never visible teaches the agent that think() does nothing."""
+    _NUDGE_STATE["armed"] = True
+    _NUDGE_STATE["since_last"] = 0
+    debt = _maintenance_debt(db)
+    if debt is not None:
+        payload["maintenance_debt"] = {
+            "writes_since_think": debt.get("writes_since_think"),
+            "last_think_at": debt.get("last_think_at"),
+            "open_conflicts": debt.get("open_conflicts"),
+            "pending_triggers": debt.get("pending_triggers"),
+        }
+        oc = debt.get("open_conflicts")
+        if isinstance(oc, int):
+            # The think response itself just surfaced the count.
+            _NUDGE_STATE["conflicts_surfaced"] = oc
+    return payload
+
+
 # ── 1. remember ──
 
 
@@ -280,7 +411,8 @@ def remember(
         if not summary.strip():
             raise ToolError("summary must be non-empty when provided")
         result = db.draft_memories_from_summary(summary.strip(), namespace=namespace, domain=domain)
-        return json.dumps(result if isinstance(result, dict) else {"drafted": result})
+        return json.dumps(_attach_write_debt(
+            db, result if isinstance(result, dict) else {"drafted": result}))
 
     # Batch mode — uses record_batch() (v0.9.0) under the hood for one-shot insert
     if memories:
@@ -347,7 +479,8 @@ def remember(
             try:
                 results = db.record_batch(inputs)
                 if isinstance(results, list):
-                    return json.dumps({"rids": results, "count": len(results), "status": "recorded"})
+                    return json.dumps(_attach_write_debt(
+                        db, {"rids": results, "count": len(results), "status": "recorded"}))
             except Exception as e:
                 # Fall through to the per-item loop — but never silently:
                 # if record_batch partially wrote before failing, an unkeyed
@@ -389,7 +522,8 @@ def remember(
                         return translated
                 raise
             results.append(rid)
-        return json.dumps({"rids": results, "count": len(results), "status": "recorded"})
+        return json.dumps(_attach_write_debt(
+            db, {"rids": results, "count": len(results), "status": "recorded"}))
 
     # Single mode
     if not text or not text.strip():
@@ -430,7 +564,7 @@ def remember(
             if translated is not None:
                 return translated
         raise
-    return json.dumps({"rid": rid, "status": "recorded"})
+    return json.dumps(_attach_write_debt(db, {"rid": rid, "status": "recorded"}))
 
 
 # ── 2. recall ──
@@ -558,7 +692,9 @@ def recall(
             {"hint_type": h["hint_type"], "suggestion": h["suggestion"], "related_entities": h["related_entities"]}
             for h in response["hints"]
         ]
-        return json.dumps({"count": len(items), "results": items, "confidence": round(response["confidence"], 4), "hints": hints})
+        return json.dumps(_attach_conflict_delta(db, {
+            "count": len(items), "results": items,
+            "confidence": round(response["confidence"], 4), "hints": hints}))
 
     # Search mode (default)
     if include_superseded:
@@ -670,7 +806,7 @@ def recall(
     # broader re-query it doesn't need — or a wrong conclusion about coverage.
     if filtered_by_ratio:
         out["filtered_by_min_score_ratio"] = filtered_by_ratio
-    return json.dumps(out)
+    return json.dumps(_attach_conflict_delta(db, out))
 
 
 # ── 3. forget ──
@@ -892,7 +1028,8 @@ def think(
             # correct failure.
             dry_run=effective_dry,
         )
-        return json.dumps({"maintenance_cycle": result if isinstance(result, dict) else {"result": result}})
+        return json.dumps(_refresh_after_think(
+            db, {"maintenance_cycle": result if isinstance(result, dict) else {"result": result}}))
 
     # Default incremental think()
     config = {
@@ -911,7 +1048,7 @@ def think(
          "urgency": t["urgency"], "suggested_action": t["suggested_action"]}
         for t in result["triggers"]
     ]
-    return json.dumps({
+    return json.dumps(_refresh_after_think(db, {
         "triggers": triggers,
         "consolidation_count": result["consolidation_count"],
         "conflicts_found": result["conflicts_found"],
@@ -920,7 +1057,7 @@ def think(
         "expired_triggers": result["expired_triggers"],
         "duration_ms": round(result["duration_ms"], 2),
         "patterns": pattern_list[:5] if pattern_list else [],
-    })
+    }))
 
 
 # ── 6. memory ──
