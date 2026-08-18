@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "yantrikdb-mcp"
-version = "0.19.1"
+version = "0.19.2"
 description = "YantrikDB — Cognitive memory for AI agents. Persistent semantic recall, knowledge graph, contradiction detection, and procedural learning. Ships as embeddable engine, network database, or MCP server."
 readme = "README.md"
 license = "MIT"
@@ -123,7 +123,7 @@ dependencies = [
     # records on the production store). The recall/think field forwarding
     # in this release likewise lands on an engine that actually reads the
     # fields. 266 passed against the published 0.15.0 wheel.
-    "yantrikdb>=0.15.0,<0.16.0",
+    "yantrikdb>=0.15.3,<0.16.0",
     # D3 firewall, same rule as the engine pin above — and for the same
     # reason, learned the same way. `mcp[cli]>=1.2.0` was UNBOUNDED, so the
     # day the SDK shipped 2.0.0 it removed `mcp.server.fastmcp` and every
