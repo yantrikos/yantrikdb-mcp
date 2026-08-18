@@ -6,12 +6,12 @@
     "url": "https://github.com/yantrikos/yantrikdb-mcp",
     "source": "github"
   },
-  "version": "0.14.0",
+  "version": "0.19.2",
   "packages": [
     {
       "registryType": "pypi",
       "identifier": "yantrikdb-mcp",
-      "version": "0.14.0",
+      "version": "0.19.2",
       "transport": {
         "type": "stdio"
       },

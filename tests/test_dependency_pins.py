@@ -22,6 +22,7 @@ Scope: install_requires only. Optional extras are opt-in — a user asking for
 """
 from __future__ import annotations
 
+import json
 import pathlib
 import re
 
@@ -124,3 +125,28 @@ def test_no_module_bypasses_the_compat_layer() -> None:
         "and will break one of the two supported lines:\n  "
         + "\n  ".join(offenders)
     )
+
+
+def test_server_json_version_matches_the_package() -> None:
+    """server.json is published to the official MCP registry by
+    .github/workflows/mcp-registry.yml on every release, so a stale version
+    there tells the registry to advertise a package that is not what shipped.
+
+    It drifted from 0.14.0 to 0.19.2 unnoticed — five minor releases — because
+    no release commit touches this file and nothing compared it to pyproject.
+    A version surface with no test is a version surface that will drift.
+    """
+    root = pathlib.Path(__file__).resolve().parents[1]
+    pyproject = (root / "pyproject.toml").read_text(encoding="utf-8")
+    expected = re.search(r'^version = "([^"]+)"', pyproject, re.M).group(1)
+
+    server_json = json.loads((root / "server.json").read_text(encoding="utf-8"))
+    assert server_json["version"] == expected, (
+        f"server.json version {server_json['version']!r} != pyproject "
+        f"{expected!r}; the MCP registry would advertise the wrong release"
+    )
+    for pkg in server_json["packages"]:
+        assert pkg["version"] == expected, (
+            f"server.json packages[{pkg.get('identifier')!r}] version "
+            f"{pkg['version']!r} != pyproject {expected!r}"
+        )
