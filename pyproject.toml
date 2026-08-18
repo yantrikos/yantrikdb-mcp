@@ -123,7 +123,14 @@ dependencies = [
     # records on the production store). The recall/think field forwarding
     # in this release likewise lands on an engine that actually reads the
     # fields. 266 passed against the published 0.15.0 wheel.
-    "yantrikdb>=0.15.3,<0.16.0",
+    # v0.19.3 raises the floor to 0.15.4 for a LICENSE reason, the first time
+    # this pin has moved for something other than behavior. Engine 0.15.3 and
+    # earlier are AGPL-3.0-only; 0.15.4 is the first Apache-2.0 release
+    # (2026-08-18, on both crates.io and PyPI). This package is MIT, so a floor
+    # that still admits an AGPL engine makes "permissively licensed end to end"
+    # true only by luck of resolution order. 0.15.4 is behavior-identical to
+    # 0.15.3 — the relicense carried no code change.
+    "yantrikdb>=0.15.4,<0.16.0",
     # D3 firewall, same rule as the engine pin above — and for the same
     # reason, learned the same way. `mcp[cli]>=1.2.0` was UNBOUNDED, so the
     # day the SDK shipped 2.0.0 it removed `mcp.server.fastmcp` and every

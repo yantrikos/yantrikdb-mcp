@@ -54,4 +54,4 @@ yantrikdb-mcp --transport sse --port 8420
 
 ## License
 
-This package is MIT. The `yantrikdb` engine dependency is AGPL-3.0; see the [README](README.md) for a short explanation of how that applies.
+This package is MIT. The `yantrikdb` engine dependency is Apache-2.0 as of engine v0.15.4 (2026-08-18; it was AGPL-3.0 before that). Both are permissive — see the [README](README.md).
