@@ -17,7 +17,7 @@ Works with Claude Code, Cursor, Windsurf, [Hermes Agent](docs/hermes.md), [Prime
 | **Storage** | Local SQLite at `~/.yantrikdb/memory.db` (or any path; or HTTP cluster) |
 | **Embedder** | Bundled 64-dim Rust embedder (default), 384-dim ONNX MiniLM (`[onnx]` extra), 256-dim multilingual (101 languages) |
 | **Tools** | 19 — remember, recall, forget, correct, think, memory, graph, conflict, trigger, session, temporal, procedure, category, personality, stats, skill, gaps, conversation, task |
-| **License** | MIT (engine: AGPL-3.0) |
+| **License** | MIT (engine: Apache-2.0) |
 | **Privacy** | All data on your machine. No telemetry. No external services. |
 
 ## Install
@@ -373,7 +373,7 @@ The YantrikDB engine is Rust ([crates.io: yantrikdb](https://crates.io/crates/ya
 | Proactive triggers | ✅ | ❌ | ❌ | ❌ | ❌ |
 | Personality traits derivation | ✅ from memory patterns | ❌ | ❌ | ❌ | ❌ |
 | Storage | local SQLite + WAL | hosted | local | local + hosted | filesystem |
-| License | MIT (engine AGPL-3.0) | Apache 2.0 | Apache 2.0 | Apache 2.0 | MIT |
+| License | MIT (engine Apache-2.0) | Apache 2.0 | Apache 2.0 | Apache 2.0 | MIT |
 | Peer-reviewed paper | ✅ [Zenodo](https://doi.org/10.5281/zenodo.20128887) | ❌ | ✅ MemGPT paper | ❌ | ❌ |
 | Same-day patch cadence for issues | ✅ (avg <2h on v0.8.x) | varies | varies | varies | n/a |
 
@@ -452,4 +452,4 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for a venv setup, running `pytest`, and o
 
 This MCP server is licensed under **MIT** — use it freely in any project.
 
-Note: This package depends on [yantrikdb](https://github.com/yantrikos/yantrikdb) (the cognitive memory engine), which is licensed under **AGPL-3.0**. The AGPL applies to the engine itself — if you modify the engine and distribute it or provide it as a network service, those modifications must also be AGPL-3.0. Using the engine as-is via this MCP server does not trigger AGPL obligations on your code.
+Note: This package depends on [yantrikdb](https://github.com/yantrikos/yantrikdb) (the cognitive memory engine), which is licensed under **Apache-2.0** as of 2026-08-18 (previously AGPL-3.0). Both this server and the engine are now permissively licensed — there are no copyleft obligations on your code, modifications, or hosted services.
