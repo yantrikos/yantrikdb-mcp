@@ -3,6 +3,12 @@ name: Publish to MCP Registry
 # Publishes server.json to the official MCP registry
 # (registry.modelcontextprotocol.io) using GitHub OIDC — no stored secrets.
 # Runs after each GitHub release, or manually via workflow_dispatch.
+#
+# TIMING: this fires on the SAME `release: published` event as publish.yml, so
+# the two race. The registry validates that the PyPI package actually exists,
+# and it loses that race — it asks about a version that is still uploading.
+# Hence the wait below. Ordering between two workflows on one event is not
+# something GitHub lets us declare, so it has to be established by polling.
 
 on:
   release:
@@ -33,8 +39,48 @@ jobs:
           mv server.json.tmp server.json
           echo "Publishing version $V"
 
+      - name: Wait for the release to be installable from PyPI
+        if: github.event_name == 'release'
+        run: |
+          V="${GITHUB_REF_NAME#v}"
+          # Poll the SIMPLE index, not the JSON API. /pypi/<pkg>/json is cached
+          # and has been observed reporting the previous version minutes after
+          # the new files were live — a wait built on it would pass early and
+          # put us right back in the race it exists to close.
+          # Filenames normalize the dash to an underscore: yantrikdb_mcp-X.Y.Z.
+          for i in $(seq 1 20); do
+            if curl -fsSL "https://pypi.org/simple/yantrikdb-mcp/" \
+                 | grep -q "yantrikdb_mcp-${V}[-.]"; then
+              echo "yantrikdb-mcp ${V} is on PyPI (attempt ${i})"
+              exit 0
+            fi
+            echo "attempt ${i}/20: ${V} not on PyPI yet; sleeping 30s"
+            sleep 30
+          done
+          echo "::error::yantrikdb-mcp ${V} did not appear on PyPI within 10 minutes."
+          echo "::error::Check the 'Publish to PyPI' workflow for this release — if it"
+          echo "::error::failed, fix that first; re-run this job once the version is live."
+          exit 1
+
       - name: Login (GitHub OIDC)
         run: mcp-publisher login github-oidc
 
       - name: Publish
-        run: mcp-publisher publish
+        run: |
+          # Retry the publish itself: the wait above proves the package is
+          # installable, but the registry can still return a transient error
+          # while its own view catches up. Three attempts, then fail loudly —
+          # a silent pass here would leave the registry advertising a version
+          # that does not match what shipped.
+          for i in 1 2 3; do
+            if mcp-publisher publish; then
+              echo "published on attempt ${i}"
+              exit 0
+            fi
+            if [ "${i}" -lt 3 ]; then
+              echo "publish attempt ${i} failed; retrying in 30s"
+              sleep 30
+            fi
+          done
+          echo "::error::mcp-publisher publish failed after 3 attempts"
+          exit 1
