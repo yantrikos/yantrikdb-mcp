@@ -5,6 +5,11 @@
 
 Works with Claude Code, Cursor, Windsurf, [Hermes Agent](docs/hermes.md), [Prime Agent](docs/prime-agent.md), and any MCP-compatible client. Ships a portable [Agent Skills](https://agentskills.io) skill — [`skills/persistent-memory`](skills/persistent-memory/SKILL.md) — that teaches any compliant harness the memory golden path.
 
+[![PyPI](https://img.shields.io/pypi/v/yantrikdb-mcp)](https://pypi.org/project/yantrikdb-mcp/)
+[![PyPI downloads](https://img.shields.io/pypi/dm/yantrikdb-mcp)](https://pypi.org/project/yantrikdb-mcp/)
+[![Python](https://img.shields.io/pypi/pyversions/yantrikdb-mcp)](https://pypi.org/project/yantrikdb-mcp/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+
 **Website:** [yantrikdb.com](https://yantrikdb.com) · **Docs:** [yantrikdb.com/guides/mcp](https://yantrikdb.com/guides/mcp/) · **GitHub:** [yantrikos/yantrikdb-mcp](https://github.com/yantrikos/yantrikdb-mcp) · **Paper:** [Skill as Memory, Not Document](https://doi.org/10.5281/zenodo.20128887)
 
 ## At a glance
@@ -447,6 +452,17 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for a venv setup, running `pytest`, and o
 - **Issues:** [github.com/yantrikos/yantrikdb-mcp/issues](https://github.com/yantrikos/yantrikdb-mcp/issues)
 - **Email:** developer@pranab.co.in
 - **Docs:** [yantrikdb.com/guides/mcp](https://yantrikdb.com/guides/mcp/)
+
+## Related projects
+
+Same memory substrate, different entry points:
+
+- [yantrikdb](https://github.com/yantrikos/yantrikdb) — the embeddable Rust/Python engine this server runs on (`pip install yantrikdb`).
+- [yantrikdb-server](https://github.com/yantrikos/yantrikdb-server) — HTTP gateway and HA cluster, for the network deployment modes above.
+- [yantrikdb-client](https://github.com/yantrikos/yantrikdb-client) — typed Python client for that server.
+- [langchain-yantrikdb](https://github.com/yantrikos/langchain-yantrikdb) — YantrikDB as a LangChain `VectorStore` and `ChatMessageHistory`.
+- [yantrikdb-hermes-plugin](https://github.com/yantrikos/yantrikdb-hermes-plugin) — memory provider for NousResearch/hermes-agent, sharing the same skill substrate.
+- [yantrik-memory](https://github.com/yantrikos/yantrik-memory) — framework-agnostic memory layer with traits and bond evolution.
 
 ## License
 
