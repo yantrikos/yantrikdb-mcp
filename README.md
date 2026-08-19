@@ -12,6 +12,10 @@ Works with Claude Code, Cursor, Windsurf, [Hermes Agent](docs/hermes.md), [Prime
 
 **Website:** [yantrikdb.com](https://yantrikdb.com) · **Docs:** [yantrikdb.com/guides/mcp](https://yantrikdb.com/guides/mcp/) · **GitHub:** [yantrikos/yantrikdb-mcp](https://github.com/yantrikos/yantrikdb-mcp) · **Paper:** [Skill as Memory, Not Document](https://doi.org/10.5281/zenodo.20128887)
 
+![yantrikdb-mcp demo: three memories stored over MCP, one recalled by a question that shares no words with it, then think() flagging that two stored beliefs about the same on-call lead contradict each other — the next session's recall comes back with open_conflicts: 1](docs/images/demo.gif)
+
+*Every value on screen is the server's own answer over MCP — driver: [`docs/demo/demo.py`](docs/demo/demo.py), recorded with [`docs/demo/demo.tape`](docs/demo/demo.tape).*
+
 ## At a glance
 
 | | |
