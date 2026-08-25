@@ -130,7 +130,7 @@ dependencies = [
     # that still admits an AGPL engine makes "permissively licensed end to end"
     # true only by luck of resolution order. 0.15.4 is behavior-identical to
     # 0.15.3 — the relicense carried no code change.
-    "yantrikdb>=0.15.4,<0.16.0",
+    "yantrikdb>=0.15.4,<0.18.0",
     # D3 firewall, same rule as the engine pin above — and for the same
     # reason, learned the same way. `mcp[cli]>=1.2.0` was UNBOUNDED, so the
     # day the SDK shipped 2.0.0 it removed `mcp.server.fastmcp` and every
