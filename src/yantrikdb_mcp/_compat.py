@@ -2,7 +2,9 @@
 
 WHY THIS EXISTS
 ---------------
-mcp 2.0.0 removed `mcp.server.fastmcp`. Every symbol this package imports at
+mcp 2.0.0 removed `mcp.server.fastmcp` (2.1.x ships it again alongside the
+canonical `mcp.server.mcpserver`, so its presence is no longer a line
+discriminator — the shim imports the canonical 2.x names first). Every symbol this package imports at
 module scope moved, so `import yantrikdb_mcp` raised ModuleNotFoundError on
 the new SDK — and because the dependency was pinned `>=1.2.0` with no
 ceiling, already-published releases silently re-shipped themselves broken the
