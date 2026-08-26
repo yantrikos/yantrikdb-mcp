@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "yantrikdb-mcp"
-version = "0.19.3"
+version = "0.19.4"
 description = "YantrikDB — Cognitive memory for AI agents. Persistent semantic recall, knowledge graph, contradiction detection, and procedural learning. Ships as embeddable engine, network database, or MCP server."
 readme = "README.md"
 license = "MIT"
@@ -130,7 +130,7 @@ dependencies = [
     # that still admits an AGPL engine makes "permissively licensed end to end"
     # true only by luck of resolution order. 0.15.4 is behavior-identical to
     # 0.15.3 — the relicense carried no code change.
-    "yantrikdb>=0.15.4,<0.18.0",
+    "yantrikdb>=0.15.4,<0.19.0",
     # D3 firewall, same rule as the engine pin above — and for the same
     # reason, learned the same way. `mcp[cli]>=1.2.0` was UNBOUNDED, so the
     # day the SDK shipped 2.0.0 it removed `mcp.server.fastmcp` and every
