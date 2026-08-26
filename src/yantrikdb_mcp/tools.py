@@ -582,6 +582,7 @@ def recall(
     include_superseded: bool = False,
     expand_entities: bool = True,
     min_score_ratio: float | None = None,
+    order: str | None = None,
     since: str | None = None,
     until: str | None = None,
     refine_from: str | None = None,
@@ -593,6 +594,12 @@ def recall(
     MODES:
     - **Search** (default): recall("project architecture decisions")
     - **Refine**: recall("PostgreSQL vs MySQL decision", refine_from="database choice", refine_exclude=["rid1"])
+
+    ORDER: by default results come back by relevance. Pass
+    order="recency" for newest-first, order="first_mention" (alias
+    "chronological") for oldest-first, or order="certainty". Ordering
+    re-sorts the top_k the search already selected — it does not widen
+    the search — and the confidence hints are omitted on that path.
     (Relevance feedback moved to memory(action="feedback") in v0.10 — recall
     is now purely read-only.)
 
@@ -696,8 +703,26 @@ def recall(
             "count": len(items), "results": items,
             "confidence": round(response["confidence"], 4), "hints": hints}))
 
+    # ORDER re-sorts the final top_k: "relevance" (default), "certainty",
+    # "recency", or "first_mention" (ascending; "chronological" is an alias).
+    #
+    # Only row-level `db.recall()` implements it — `db.recall_with_response()`,
+    # the default path here, does not. Rather than accept the argument and let
+    # it do nothing on the common path (the failure this fixes: `order` was not
+    # a parameter at all, so passing it was silently ignored), an explicit
+    # order routes through `db.recall()`, which is the same escape hatch
+    # `include_superseded` already uses. The cost is the hints envelope, which
+    # that path does not produce; that is stated rather than hidden.
+    _ORDERS = ("relevance", "certainty", "recency", "first_mention", "chronological")
+    if order is not None:
+        if order not in _ORDERS:
+            raise ToolError(
+                f"order must be one of {', '.join(_ORDERS)} (got {order!r})")
+        if refine_from:
+            raise ToolError("order is not supported when refining; refine first, then recall with order")
+
     # Search mode (default)
-    if include_superseded:
+    if include_superseded or (order is not None and order != "relevance"):
         # recall_with_response has no include_superseded flag (gap reported
         # to core 2026-07-17) — the archaeology path goes through db.recall,
         # which returns the same per-item fields minus the hints envelope.
@@ -706,7 +731,8 @@ def recall(
             include_consolidated=include_consolidated,
             expand_entities=expand_entities,
             namespace=namespace, domain=domain, source=source,
-            include_superseded=True,
+            include_superseded=include_superseded,
+            order=order,
             time_window=time_window,
         )
         response = {

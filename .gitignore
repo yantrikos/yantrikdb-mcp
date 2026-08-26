@@ -8,3 +8,28 @@ __pycache__/
 *.egg-info/
 dist/
 build/
+
+# ── Local config that carries credentials ────────────────────────────
+# `.mcp.json` holds live API keys. It was swept into a commit here by a
+# careless `git add -A` on 2026-08-26 and only GitHub's push protection
+# stopped it from being published. The core and server repos had already
+# ignored it; this one had not.
+.mcp.json
+.mcp.local.json
+.env
+.env.*
+!.env.example
+.claude/
+*.local.json
+
+# ── Build artifacts ──────────────────────────────────────────────────
+dist/
+dist-*/
+build/
+*.egg-info/
+*.mcpb
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
