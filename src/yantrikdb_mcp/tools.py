@@ -595,11 +595,8 @@ def recall(
     - **Search** (default): recall("project architecture decisions")
     - **Refine**: recall("PostgreSQL vs MySQL decision", refine_from="database choice", refine_exclude=["rid1"])
 
-    ORDER: by default results come back by relevance. Pass
-    order="recency" for newest-first, order="first_mention" (alias
-    "chronological") for oldest-first, or order="certainty". Ordering
-    re-sorts the top_k the search already selected — it does not widen
-    the search — and the confidence hints are omitted on that path.
+    ORDER: "recency" | "first_mention" (alias "chronological") |
+    "certainty". Re-sorts the top_k already found; hints omitted.
     (Relevance feedback moved to memory(action="feedback") in v0.10 — recall
     is now purely read-only.)
 
