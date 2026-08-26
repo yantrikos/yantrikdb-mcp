@@ -89,7 +89,18 @@ FULL_TOOLS = CORE_TOOLS | {
 #     keyword matches while six in-window memories retrieved zero — an
 #     agent that is never told period questions route to range/since-until
 #     re-creates that failure on every deictic query it makes.
-SCHEMA_BUDGET_CHARS = 48_600
+# 48_600 -> 48_800 (REVIEWED): recall gains `order`. The parameter was
+#     DOCUMENTED as engine behaviour since #46 and was not a parameter of
+#     this tool at all, so `order="recency"` was silently ignored and
+#     returned relevance order — verified on the live store, where ordered
+#     and unordered calls came back byte-identical. Measured 46,640 on
+#     py3.13 and ~48,592 on py3.10 after trimming the prose to two lines;
+#     the ceiling moves 200 so the next honest addition is not decided by
+#     eight characters. And the trap in note (2) caught us AGAIN: py3.10
+#     renders ~1,950 chars more than py3.13 for identical code, so the
+#     local suite passed while CI failed — which is why that follow-up
+#     (measure per-interpreter) is still the right fix.
+SCHEMA_BUDGET_CHARS = 48_800
 
 
 def _rpc(proc, method, params, mid):
