@@ -339,6 +339,7 @@ def remember(
     summary: str | None = None,
     idempotency_key: str | None = None,
     created_at: str | None = None,
+    claims: list[dict] | None = None,
     ctx: Context = None,
 ) -> str:
     """Store one or more memories in persistent cognitive memory.
@@ -380,8 +381,27 @@ def remember(
             and flattens staleness/decay. Same formats as as_of:
             "2026-08-01", "2026-08-01T14:30:00Z", "7d" (ago), or unix seconds.
             Omit for anything learned in the present conversation.
+        claims: v0.19 engine — facts this memory states, as [{"subject",
+            "relation", "object"}]; state one for any fact you want tracked
+            (contradiction, succession, multi-hop). Subject and object must
+            occur in the text, relation is snake_case; ungrounded ones are
+            reported back, not stored. Batch items take their own "claims".
     """
     db = _get_db(ctx)
+
+    # Stated claims (v0.19 engine). Refused BEFORE any write on an engine
+    # that cannot ground them: recording the text and dropping the claims
+    # would report "recorded" for facts the caller asked to have tracked.
+    batch_claims = any(m.get("claims") for m in (memories or []) if isinstance(m, dict))
+    if (claims or batch_claims) and not hasattr(db, "attach_claims"):
+        return _err(
+            "claims= needs attach_claims on this backend: embedded engine "
+            "v0.19+ (not yet available over the HTTP backend). Nothing was "
+            "recorded — re-run without claims, or upgrade the engine; "
+            "recording the text alone would silently drop the facts you asked "
+            "to have tracked.",
+            required_engine="0.19.0",
+        )
 
     # Backdating (v0.14 engine). Refused loudly rather than dropped on an
     # engine that can't honour it: silently stamping "now" on a memory the
@@ -475,12 +495,16 @@ def remember(
                 "this backend would silently stamp 'now' on backfilled "
                 "history. Remove per-item created_at or upgrade."
             )
+        item_claims = [m.get("claims") or None for m in memories]
         if hasattr(db, "record_batch") and not idempotency_key:
             try:
                 results = db.record_batch(inputs)
                 if isinstance(results, list):
-                    return json.dumps(_attach_write_debt(
-                        db, {"rids": results, "count": len(results), "status": "recorded"}))
+                    out = {"rids": results, "count": len(results), "status": "recorded"}
+                    reports = _attach_item_claims(db, results, item_claims)
+                    if reports:
+                        out["claims"] = reports
+                    return json.dumps(_attach_write_debt(db, out))
             except Exception as e:
                 # Fall through to the per-item loop — but never silently:
                 # if record_batch partially wrote before failing, an unkeyed
@@ -522,8 +546,11 @@ def remember(
                         return translated
                 raise
             results.append(rid)
-        return json.dumps(_attach_write_debt(
-            db, {"rids": results, "count": len(results), "status": "recorded"}))
+        out = {"rids": results, "count": len(results), "status": "recorded"}
+        reports = _attach_item_claims(db, results, item_claims)
+        if reports:
+            out["claims"] = reports
+        return json.dumps(_attach_write_debt(db, out))
 
     # Single mode
     if not text or not text.strip():
@@ -564,7 +591,28 @@ def remember(
             if translated is not None:
                 return translated
         raise
-    return json.dumps(_attach_write_debt(db, {"rid": rid, "status": "recorded"}))
+    out = {"rid": rid, "status": "recorded"}
+    if claims:
+        out["claims"] = _claims_report(db.attach_claims(rid, claims))
+    return json.dumps(_attach_write_debt(db, out))
+
+
+def _claims_report(report: dict) -> dict:
+    """Shape the engine's attach_claims report: a count for what landed, the
+    full rejected list (with reasons) because that is what the caller acts on."""
+    return {
+        "accepted": len(report.get("accepted", [])),
+        "rejected": report.get("rejected", []),
+    }
+
+
+def _attach_item_claims(db, rids: list, item_claims: list) -> dict:
+    """Per-item claims for a batch; keyed by index so a rejection names the item."""
+    reports = {}
+    for i, (rid, cl) in enumerate(zip(rids, item_claims)):
+        if cl:
+            reports[str(i)] = _claims_report(db.attach_claims(rid, cl))
+    return reports
 
 
 # ── 2. recall ──

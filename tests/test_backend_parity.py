@@ -93,6 +93,12 @@ HASATTR_GUARDED = {
     # remember/recall/think surfacing; no /v1 endpoint yet (future:
     # GET /v1/maintenance/debt). See the comment block in http_backend.py.
     "maintenance_debt",
+    # tools.remember(): `claims=` is refused BEFORE any write when the db
+    # lacks attach_claims (engine < 0.19, or the HTTP backend until the
+    # server exposes it); the refusal names the requirement. A stub would
+    # pass the probe, record the text, then raise — a write with dropped
+    # facts, which is the outcome the probe exists to prevent.
+    "attach_claims",
 }
 
 
