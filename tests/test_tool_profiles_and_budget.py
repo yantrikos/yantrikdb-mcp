@@ -100,7 +100,14 @@ FULL_TOOLS = CORE_TOOLS | {
 #     renders ~1,950 chars more than py3.13 for identical code, so the
 #     local suite passed while CI failed — which is why that follow-up
 #     (measure per-interpreter) is still the right fix.
-SCHEMA_BUDGET_CHARS = 48_800
+# 48_800 -> 49_300 (REVIEWED): remember gains `claims` for engine 0.19's
+#     cooperative claims. The engine infers only a few relation shapes on
+#     its own; every other fact an agent wants tracked (contradiction,
+#     succession, multi-hop) has to be STATED, and an agent that is never
+#     told the parameter exists never states one — so the five docstring
+#     lines are the feature, not decoration. Measured 49,129 on py3.10
+#     after trimming from ten lines; one `list[dict] | None` param.
+SCHEMA_BUDGET_CHARS = 49_300
 
 
 def _rpc(proc, method, params, mid):

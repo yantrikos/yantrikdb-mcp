@@ -843,6 +843,13 @@ class HttpBackend:
             body["domain"] = domain
         return self._post("/v1/session/end", body)
 
+    # ── attach_claims: DELIBERATELY ABSENT, not a raising stub ───────
+    # tools.remember() probes `hasattr(db, "attach_claims")` BEFORE writing
+    # and refuses the whole call (required_engine 0.19.0) when it is
+    # missing, so no memory is ever recorded with its stated claims
+    # dropped. A stub would pass that probe, record the text, then raise.
+    # Add the real method when the server exposes claims over /v1.
+
     # ── maintenance_debt: DELIBERATELY ABSENT, not a raising stub ────
     # The tool layer probes `hasattr(db, "maintenance_debt")` before every
     # opportunistic debt read (remember/recall/think surfacing) and silently
