@@ -340,6 +340,7 @@ def remember(
     idempotency_key: str | None = None,
     created_at: str | None = None,
     claims: list[dict] | None = None,
+    event_time: str | None = None,
     ctx: Context = None,
 ) -> str:
     """Store one or more memories in persistent cognitive memory.
@@ -386,6 +387,11 @@ def remember(
             (contradiction, succession, multi-hop). Subject and object must
             occur in the text, relation is snake_case; ungrounded ones are
             reported back, not stored. Batch items take their own "claims".
+            A claim may carry "valid_from"/"valid_to" (created_at formats).
+        event_time: when the memory is ABOUT, not when written (created_at
+            formats). Time-travel recall reads it and every claim on the
+            memory inherits it as valid_from, so an older fact is the
+            predecessor of a newer one, not its contradiction.
     """
     db = _get_db(ctx)
 
@@ -450,7 +456,7 @@ def remember(
                 "memory_type": mt,
                 "importance": max(0.0, min(1.0, mem.get("importance", 0.5))),
                 "valence": max(-1.0, min(1.0, mem.get("valence", 0.0))),
-                "metadata": mem.get("metadata", {}),
+                "metadata": _with_event_time(mem.get("metadata", {}), mem.get("event_time", event_time)),
                 "namespace": mem.get("namespace", namespace),
                 "certainty": max(0.0, min(1.0, mem.get("certainty", 0.8))),
                 "domain": mem.get("domain", "general"),
@@ -495,7 +501,7 @@ def remember(
                 "this backend would silently stamp 'now' on backfilled "
                 "history. Remove per-item created_at or upgrade."
             )
-        item_claims = [m.get("claims") or None for m in memories]
+        item_claims = [_claims_with_windows(m.get("claims")) or None for m in memories]
         if hasattr(db, "record_batch") and not idempotency_key:
             try:
                 results = db.record_batch(inputs)
@@ -576,7 +582,7 @@ def remember(
 
     record_kwargs = dict(
         memory_type=memory_type, importance=importance, valence=valence,
-        metadata=metadata or {}, namespace=namespace, certainty=certainty,
+        metadata=_with_event_time(metadata, event_time), namespace=namespace, certainty=certainty,
         domain=domain, source=source, emotional_state=emotional_state,
     )
     if idempotency_key:
@@ -593,8 +599,38 @@ def remember(
         raise
     out = {"rid": rid, "status": "recorded"}
     if claims:
-        out["claims"] = _claims_report(db.attach_claims(rid, claims))
+        out["claims"] = _claims_report(db.attach_claims(rid, _claims_with_windows(claims)))
     return json.dumps(_attach_write_debt(db, out))
+
+
+def _with_event_time(metadata: dict | None, event_time) -> dict:
+    """Stamp the record's temporal tag: metadata event_time_min/max, which
+    the engine persists as columns and reads for as_of recall and for the
+    validity window of every claim on the memory."""
+    meta = dict(metadata or {})
+    if event_time is not None and event_time != "":
+        ts = _parse_timestamp(event_time, field="event_time")
+        meta.setdefault("event_time_min", ts)
+        meta.setdefault("event_time_max", ts)
+    return meta
+
+
+def _claims_with_windows(claims: list | None) -> list | None:
+    """Turn "valid_from"/"valid_to" on a claim from an agent-supplied instant
+    into the unix float the engine takes; other keys pass through."""
+    if not claims:
+        return claims
+    out = []
+    for c in claims:
+        if not isinstance(c, dict):
+            out.append(c)
+            continue
+        c = dict(c)
+        for k in ("valid_from", "valid_to"):
+            if c.get(k) not in (None, ""):
+                c[k] = _parse_timestamp(c[k], field=k)
+        out.append(c)
+    return out
 
 
 def _claims_report(report: dict) -> dict:

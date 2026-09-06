@@ -107,7 +107,13 @@ FULL_TOOLS = CORE_TOOLS | {
 #     told the parameter exists never states one — so the five docstring
 #     lines are the feature, not decoration. Measured 49,129 on py3.10
 #     after trimming from ten lines; one `list[dict] | None` param.
-SCHEMA_BUDGET_CHARS = 49_300
+# 49_300 -> 49_700 (REVIEWED): remember gains `event_time` — the temporal
+#     tag. Measured 49,600 on py3.10 after trimming the prose to four
+#     lines; ~300 of the residual is the `str | None` anyOf rendering on
+#     py3.10/3.12 (note 2 above), the rest is the one sentence that tells
+#     an agent WHY to set it (an older fact becomes a predecessor, not a
+#     contradiction) — without that sentence the parameter is never used.
+SCHEMA_BUDGET_CHARS = 49_700
 
 
 def _rpc(proc, method, params, mid):
