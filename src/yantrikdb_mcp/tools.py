@@ -387,15 +387,11 @@ def remember(
             (contradiction, succession, multi-hop). Subject and object must
             occur in the text, relation is snake_case; ungrounded ones are
             reported back, not stored. Batch items take their own "claims".
-            A claim may carry "valid_from"/"valid_to" (same formats as
-            created_at) for when the fact held; otherwise it inherits
-            event_time.
-        event_time: when the memory is ABOUT (not when it was written):
-            "2026-08-01", "2026-08-01T14:30:00Z", "7d" (ago) or unix seconds.
-            Sets the record's temporal tag, which time-travel recall reads
-            and every claim on the memory inherits as valid_from — so a
-            fact from 2024 is not a contradiction of the same fact in 2026,
-            it is its predecessor. Batch items take their own "event_time".
+            A claim may carry "valid_from"/"valid_to" (created_at formats).
+        event_time: when the memory is ABOUT, not when written (created_at
+            formats). Time-travel recall reads it and every claim on the
+            memory inherits it as valid_from, so an older fact is the
+            predecessor of a newer one, not its contradiction.
     """
     db = _get_db(ctx)
 
