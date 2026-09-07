@@ -25,7 +25,9 @@ Override with `YANTRIKDB_EMBEDDER=auto|bundled|onnx|multilingual`.
 
 import logging
 import os
-import sqlite3
+import subprocess
+import sys
+import textwrap
 import time
 from pathlib import Path
 
@@ -126,33 +128,60 @@ class OnnxEmbedder:
 # ─────────────────────────────────────────────────────────────────────
 
 
+_PROBE_CODE = textwrap.dedent(
+    """
+    import sqlite3, sys
+    p = sys.argv[1]
+    try:
+        c = sqlite3.connect(f"file:{p}?mode=ro", uri=True, timeout=2.0)
+    except Exception:
+        print(0)
+        raise SystemExit(0)
+    try:
+        for q in (
+            "SELECT 1 FROM memories WHERE tombstoned = 0 LIMIT 1",
+            "SELECT 1 FROM memories LIMIT 1",
+        ):
+            try:
+                if c.execute(q).fetchone():
+                    print(1)
+                    raise SystemExit(0)
+            except sqlite3.OperationalError:
+                continue
+        print(0)
+    finally:
+        c.close()
+    """
+)
+
+
 def db_has_memories(db_path: str | os.PathLike) -> bool:
     """Probe a YantrikDB SQLite file for existing active memories.
 
     Returns False for missing/empty/locked files — anything that fails
     is treated as "no prior data", so we default to the lean path.
+
+    The probe runs in a CHILD process on purpose (yantrikdb issue #225,
+    CONCURRENCY.md Rule 9): the engine bundles its own SQLite, and the
+    stdlib ``sqlite3`` module is a second one. Two SQLite libraries on one
+    store in one process corrupt it silently — POSIX locks are per
+    process, so the stdlib connection's unlock releases the engine's. A
+    child process is serialised by the kernel, so this stays safe even if
+    a caller probes while the engine is open, and this process never
+    loads the stdlib SQLite at all.
     """
     p = Path(db_path)
     if not p.exists() or p.stat().st_size == 0:
         return False
     try:
-        conn = sqlite3.connect(f"file:{p}?mode=ro", uri=True, timeout=2.0)
-        try:
-            cur = conn.cursor()
-            # Try a few likely shapes — schema has evolved; we only need a yes/no.
-            for q in (
-                "SELECT 1 FROM memories WHERE tombstoned = 0 LIMIT 1",
-                "SELECT 1 FROM memories LIMIT 1",
-            ):
-                try:
-                    row = cur.execute(q).fetchone()
-                    if row:
-                        return True
-                except sqlite3.OperationalError:
-                    continue
-            return False
-        finally:
-            conn.close()
+        out = subprocess.run(
+            [sys.executable, "-I", "-c", _PROBE_CODE, str(p)],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+        return out.stdout.strip() == "1"
     except Exception as e:
         log.debug("db_has_memories probe failed for %s: %s", p, e)
         return False
