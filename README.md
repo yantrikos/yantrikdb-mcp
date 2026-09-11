@@ -174,7 +174,7 @@ File-based memory (CLAUDE.md, memory files) loads **everything** into context ev
 - YantrikDB stays at ~70 tokens per query, under 60ms latency
 - Precision *improves* with more data — the opposite of context stuffing
 
-Run the benchmark yourself: `python benchmarks/bench_token_savings.py`
+Run the benchmark yourself: `git clone https://github.com/yantrikos/yantrikdb-mcp && cd yantrikdb-mcp && python benchmarks/bench_token_savings.py`
 
 ## Recommended agent workflow (golden path)
 
