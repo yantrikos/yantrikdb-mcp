@@ -36,6 +36,9 @@ CORE_TOOLS = {
 FULL_TOOLS = CORE_TOOLS | {
     "temporal", "category", "personality", "trigger", "stats",
     "conversation", "task", "gaps", "skill",
+    # v0.24.0: `atlas` exports this store's Memory Atlas (a static page) and
+    # serves it on 127.0.0.1; read-only, embedded mode only, full profile.
+    "atlas",
     # v0.11.0: registers only when the ENGINE carries the pack substrate
     # (feature-probed). Guarded below so this suite stays green on a v0.10
     # engine, where the tool is deliberately absent rather than broken.
