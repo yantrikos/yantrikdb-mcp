@@ -3380,19 +3380,19 @@ def atlas(
     127.0.0.1. Read-only; nothing leaves the machine.
 
     ACTIONS:
-    - "export": (default) export now and serve; returns the local URL, the
+    - "export": (default) export and serve; returns the local URL, the
       output directory and the exporter's report. Re-running refreshes the
-      files under the same URL for the life of this process.
+      files under the same URL.
     - "status": the atlas servers this process is running.
 
     Args:
         out_dir: Output directory (default `<store>.atlas/` beside the store).
-        port: Local port (0 = pick a free one).
+        port: Local port (0 = free one).
         label: Provenance label shown in the page header.
-        open_browser: Also open the URL in the default browser.
+        open_browser: Also open the URL in the browser.
 
-    Embedded mode only (cluster mode has no local file: use the `yantrikdb
-    atlas` CLI on a node). Needs an engine that ships yantrikdb/atlas/.
+    Embedded mode only (cluster mode: use the `yantrikdb atlas` CLI on a
+    node). Needs an engine that ships yantrikdb/atlas/.
     """
     if action not in ("export", "status"):
         raise ToolError("action must be 'export' or 'status'")
