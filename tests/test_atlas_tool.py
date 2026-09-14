@@ -30,7 +30,13 @@ def store(tmp_path, monkeypatch):
     monkeypatch.delenv("YANTRIKDB_SERVER_URL", raising=False)
     monkeypatch.setenv("YANTRIKDB_DB_PATH", str(db))
     monkeypatch.setattr(tools, "_atlas_exporter_path", lambda: Path("/fake/yantrikdb/atlas/export_atlas.py"))
+    monkeypatch.setattr(tools, "_atlas_serve_available", lambda: True)
     return db
+
+
+# Serving goes through the engine package's shared allowlist server; the
+# tests that exercise it need an engine that ships `yantrikdb.atlas.serve`.
+_serve = pytest.importorskip("yantrikdb.atlas.serve", reason="engine lacks yantrikdb.atlas.serve")
 
 
 def _fake_exporter(out_dir_holder):
@@ -65,7 +71,24 @@ def test_refuses_when_the_engine_has_no_exporter(store, monkeypatch):
     monkeypatch.setattr(tools, "_atlas_exporter_path", lambda: None)
     with pytest.raises(ToolError) as e:
         atlas(ctx=object())
-    assert "export_atlas.py" in str(e.value), "the refusal names the file the engine must ship"
+    assert "yantrikdb/atlas/" in str(e.value), "the refusal names what the engine must ship"
+
+
+def test_refuses_an_out_dir_that_is_the_store_directory(store, tmp_path, monkeypatch):
+    """Serving that directory would expose the store itself (review P1)."""
+    monkeypatch.setattr(tools, "_run_exporter", _fake_exporter([]))
+    with pytest.raises(ToolError, match="store's own directory"):
+        atlas(out_dir=str(store.parent), ctx=object())
+
+
+def test_served_directory_hands_out_only_the_artifacts(store, tmp_path, monkeypatch):
+    monkeypatch.setattr(tools, "_run_exporter", _fake_exporter([]))
+    out = json.loads(atlas(out_dir=str(tmp_path / "atlas"), ctx=object()))
+    (tmp_path / "atlas" / "secret.txt").write_text("never", encoding="utf-8")
+    import urllib.error
+    with pytest.raises(urllib.error.HTTPError) as e:
+        urllib.request.urlopen(out["url"] + "secret.txt", timeout=5)
+    assert e.value.code == 404
 
 
 def test_export_serves_the_page_and_returns_its_url(store, tmp_path, monkeypatch):

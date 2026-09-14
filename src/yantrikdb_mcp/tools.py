@@ -3320,6 +3320,15 @@ def _atlas_exporter_path() -> Path | None:
     return None
 
 
+def _atlas_serve_available() -> bool:
+    import importlib.util
+
+    try:
+        return importlib.util.find_spec("yantrikdb.atlas.serve") is not None
+    except (ImportError, ValueError):
+        return False
+
+
 def _atlas_store_path() -> Path:
     if os.environ.get("YANTRIKDB_SERVER_URL", "").strip():
         raise ToolError(
@@ -3341,30 +3350,18 @@ def _run_exporter(cmd: list[str]):
 
 
 def _serve_dir(out_dir: Path, port: int) -> str:
-    """Serve `out_dir` (the dedicated export directory, never the store's
-    directory) on 127.0.0.1 from a daemon thread. One server per directory
-    for the life of this process; a re-export refreshes the files under the
-    same URL."""
-    from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+    """Serve the export directory through the engine package's allowlist
+    server (`yantrikdb.atlas.serve`): exactly index.html, data.json and
+    export-report.json, no listings, no symlink escapes — the same code the
+    `yantrikdb atlas` CLI uses, so the two cannot drift. One server per
+    directory for the life of this process."""
+    from yantrikdb.atlas.serve import serve_in_background
 
     key = str(out_dir.resolve())
     with _atlas_lock:
         if key in _atlas_servers:
             return _atlas_servers[key][1]
-
-        class _Handler(SimpleHTTPRequestHandler):
-            def __init__(self, *a, **kw):
-                super().__init__(*a, directory=key, **kw)
-
-            def log_message(self, *_a):  # keep the MCP stdio channel quiet
-                pass
-
-        httpd = ThreadingHTTPServer(("127.0.0.1", port), _Handler)
-        bound_port = httpd.server_address[1]
-        threading.Thread(
-            target=httpd.serve_forever, name=f"yantrikdb-atlas:{bound_port}", daemon=True
-        ).start()
-        url = f"http://127.0.0.1:{bound_port}/"
+        httpd, url = serve_in_background(out_dir, port)
         _atlas_servers[key] = (httpd, url)
         return url
 
@@ -3416,14 +3413,20 @@ def atlas(
 
     store = _atlas_store_path()
     script = _atlas_exporter_path()
-    if script is None:
+    if script is None or not _atlas_serve_available():
         raise ToolError(
-            "this engine package does not ship the atlas exporter "
-            "(yantrikdb/atlas/export_atlas.py). Upgrade yantrikdb to a release that "
-            "includes it, or run examples/memory_atlas/export_atlas.py from the "
-            "engine repository."
+            "this engine package does not ship the atlas exporter and server "
+            "(yantrikdb/atlas/). Upgrade yantrikdb to a release that includes them, "
+            "or run examples/memory_atlas/export_atlas.py from the engine repository."
         )
-    out = Path(out_dir) if out_dir else store.with_name(store.name + ".atlas")
+    from yantrikdb.atlas.serve import atlas_out_dir
+
+    try:
+        # Never the store's directory; never an existing directory that is
+        # not already an atlas export (nothing unrelated overwritten or served).
+        out = atlas_out_dir(Path(out_dir) if out_dir else store.with_name(store.name + ".atlas"), store)
+    except ValueError as e:
+        raise ToolError(str(e))
     cmd = [sys.executable, str(script), "--stores", str(store), "--out", str(out)]
     if label:
         cmd += ["--label", label]
