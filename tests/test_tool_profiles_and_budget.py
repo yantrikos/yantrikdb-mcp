@@ -116,7 +116,12 @@ FULL_TOOLS = CORE_TOOLS | {
 #     py3.10/3.12 (note 2 above), the rest is the one sentence that tells
 #     an agent WHY to set it (an older fact becomes a predecessor, not a
 #     contradiction) — without that sentence the parameter is never used.
-SCHEMA_BUDGET_CHARS = 49_700
+# 49_700 -> 51_000 on the v0.24.0 branch (REVIEWED): the `atlas` tool adds
+# ~1,300 chars (after trimming its description) for the Memory Atlas export;
+# the previous total sat 100 chars under the budget on the CI SDK, so any
+# addition needed a raise. Measured on the CI matrix, not locally: the CI
+# SDK renders the same schema ~4% larger than the local one.
+SCHEMA_BUDGET_CHARS = 51_000
 
 
 def _rpc(proc, method, params, mid):

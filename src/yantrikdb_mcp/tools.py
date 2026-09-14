@@ -3375,34 +3375,24 @@ def atlas(
     open_browser: bool = False,
     ctx: Context = None,
 ) -> str:
-    """Export this store's Memory Atlas and serve it on localhost.
-
-    The atlas is a static page: every memory the store still holds, the
-    entities the engine linked it to, the claims it backs, the revision
-    history of anything corrected, and the tasks — one sphere per
-    namespace, lines for shared entities, an inspector per memory. It is an
-    inventory of what is stored, not a retrieval trace. Read-only: the store
-    is not modified, and nothing leaves the machine (127.0.0.1 only).
+    """Export this store's Memory Atlas (a static page: every memory, its
+    entity links, claims, revision history and tasks) and serve it on
+    127.0.0.1. Read-only; nothing leaves the machine.
 
     ACTIONS:
-    - "export": (default) export now and serve. Returns the local URL, the
+    - "export": (default) export now and serve; returns the local URL, the
       output directory and the exporter's report. Re-running refreshes the
-      files; the same directory keeps the same URL for the life of this
-      server process.
+      files under the same URL for the life of this process.
     - "status": the atlas servers this process is running.
 
     Args:
-        out_dir: Where to write the page and data (default: `<store>.atlas/`
-                 next to the store file, so two stores never share one).
-        port: Local server port (default 0 = pick a free one).
-        label: Optional provenance label shown in the page header.
+        out_dir: Output directory (default `<store>.atlas/` beside the store).
+        port: Local port (0 = pick a free one).
+        label: Provenance label shown in the page header.
         open_browser: Also open the URL in the default browser.
 
-    Scope: exactly the store this server is configured for
-    (YANTRIKDB_DB_PATH), all of its namespaces. Embedded mode only: cluster
-    mode has no local file, so use the `yantrikdb atlas` CLI on a node.
-    Needs an engine package that ships yantrikdb/atlas/export_atlas.py; an
-    older engine gets a refusal that says so.
+    Embedded mode only (cluster mode has no local file: use the `yantrikdb
+    atlas` CLI on a node). Needs an engine that ships yantrikdb/atlas/.
     """
     if action not in ("export", "status"):
         raise ToolError("action must be 'export' or 'status'")
