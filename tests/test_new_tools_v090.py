@@ -142,7 +142,9 @@ def test_v090_tools_registered(mcp_proc):
         engine_has_packs = hasattr(YantrikDB, "install_pack")
     except ImportError:  # pragma: no cover
         engine_has_packs = False
-    expected = 19 + (1 if engine_has_packs else 0)
+    # v0.24.0: `atlas` (read-only Memory Atlas export + local serve) is
+    # always registered in the full profile — 20 before the pack probe.
+    expected = 20 + (1 if engine_has_packs else 0)
     assert len(names) == expected, (
         f"expected {expected} tools, got {len(names)}: {sorted(names)}"
     )

@@ -4,7 +4,10 @@ import json
 import logging
 import os
 import re
+import sys
+import threading
 import time
+from pathlib import Path
 
 from ._compat import Context, ToolAnnotations, ToolError
 
@@ -3279,3 +3282,166 @@ if os.environ.get("YANTRIKDB_ENABLE_ADMIN_TOOLS", "").strip().lower() in ("1", "
         else:
             result = db.maintenance_status(tenant=tenant)
         return json.dumps(result if isinstance(result, dict) else {"result": result})
+
+
+# ── Atlas (v0.24.0) ──
+#
+# Export this store's Memory Atlas (shipped in the engine package as
+# yantrikdb/atlas/export_atlas.py + index.html) and serve it on localhost,
+# so "show me my memory" becomes one call and a link.
+#
+# The exporter runs as a CHILD PROCESS, by ABSOLUTE SCRIPT PATH, on purpose:
+# it reads the store with Python's sqlite3, and a second SQLite library may
+# never open the store inside the engine's own process (CONCURRENCY.md
+# rule 9 in the engine repo). It is invoked as a script rather than with
+# `-m yantrikdb.atlas...` so the child never imports the `yantrikdb`
+# package, whose __init__ loads the native engine module. From a separate
+# process the read is safe: read-only, and the exporter refuses if the
+# file changes while it reads.
+
+_atlas_servers: dict[str, tuple[object, str]] = {}  # resolved out_dir -> (httpd, url)
+_atlas_lock = threading.Lock()
+
+
+def _atlas_exporter_path() -> Path | None:
+    """Absolute path of the engine package's exporter script, or None when
+    the installed engine predates it. `find_spec` on the top-level package
+    does not execute it (and in this process it is already imported)."""
+    import importlib.util
+
+    try:
+        spec = importlib.util.find_spec("yantrikdb")
+    except (ImportError, ValueError):
+        return None
+    for loc in (spec.submodule_search_locations or []) if spec else []:
+        p = Path(loc) / "atlas" / "export_atlas.py"
+        if p.is_file():
+            return p
+    return None
+
+
+def _atlas_serve_available() -> bool:
+    import importlib.util
+
+    try:
+        return importlib.util.find_spec("yantrikdb.atlas.serve") is not None
+    except (ImportError, ValueError):
+        return False
+
+
+def _atlas_store_path() -> Path:
+    if os.environ.get("YANTRIKDB_SERVER_URL", "").strip():
+        raise ToolError(
+            "atlas needs an embedded store: it reads the .db file next to this "
+            "server, and cluster mode (YANTRIKDB_SERVER_URL) has no local file. "
+            "Run `yantrikdb atlas <path/to/store.db>` on a node instead."
+        )
+    p = Path(os.environ.get("YANTRIKDB_DB_PATH", str(Path.home() / ".yantrikdb" / "memory.db")))
+    if not p.is_file():
+        raise ToolError(f"no store file at {p} — nothing to export yet")
+    return p
+
+
+def _run_exporter(cmd: list[str]):
+    """Run the exporter command; separated so tests can stand it in."""
+    import subprocess
+
+    return subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+
+
+def _serve_dir(out_dir: Path, port: int) -> str:
+    """Serve the export directory through the engine package's allowlist
+    server (`yantrikdb.atlas.serve`): exactly index.html, data.json and
+    export-report.json, no listings, no symlink escapes — the same code the
+    `yantrikdb atlas` CLI uses, so the two cannot drift. One server per
+    directory for the life of this process."""
+    from yantrikdb.atlas.serve import serve_in_background
+
+    key = str(out_dir.resolve())
+    with _atlas_lock:
+        if key in _atlas_servers:
+            return _atlas_servers[key][1]
+        httpd, url = serve_in_background(out_dir, port)
+        _atlas_servers[key] = (httpd, url)
+        return url
+
+
+@_specialist_tool(annotations=ToolAnnotations(title="Atlas", readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False))
+def atlas(
+    action: str = "export",
+    out_dir: str | None = None,
+    port: int = 0,
+    label: str | None = None,
+    open_browser: bool = False,
+    ctx: Context = None,
+) -> str:
+    """Export this store's Memory Atlas (a static page: every memory, its
+    entity links, claims, revision history and tasks) and serve it on
+    127.0.0.1. Read-only; nothing leaves the machine.
+
+    ACTIONS:
+    - "export": (default) export and serve; returns the local URL, the
+      output directory and the exporter's report. Re-running refreshes the
+      files under the same URL.
+    - "status": the atlas servers this process is running.
+
+    Args:
+        out_dir: Output directory (default `<store>.atlas/` beside the store).
+        port: Local port (0 = free one).
+        label: Provenance label shown in the page header.
+        open_browser: Also open the URL in the browser.
+
+    Embedded mode only (cluster mode: use the `yantrikdb atlas` CLI on a
+    node). Needs an engine that ships yantrikdb/atlas/.
+    """
+    if action not in ("export", "status"):
+        raise ToolError("action must be 'export' or 'status'")
+    if action == "status":
+        with _atlas_lock:
+            servers = [{"out_dir": k, "url": v[1]} for k, v in _atlas_servers.items()]
+        return json.dumps({"servers": servers})
+
+    store = _atlas_store_path()
+    script = _atlas_exporter_path()
+    if script is None or not _atlas_serve_available():
+        raise ToolError(
+            "this engine package does not ship the atlas exporter and server "
+            "(yantrikdb/atlas/). Upgrade yantrikdb to a release that includes them, "
+            "or run examples/memory_atlas/export_atlas.py from the engine repository."
+        )
+    from yantrikdb.atlas.serve import atlas_out_dir
+
+    try:
+        # Never the store's directory; never an existing directory that is
+        # not already an atlas export (nothing unrelated overwritten or served).
+        out = atlas_out_dir(Path(out_dir) if out_dir else store.with_name(store.name + ".atlas"), store)
+    except ValueError as e:
+        raise ToolError(str(e))
+    cmd = [sys.executable, str(script), "--stores", str(store), "--out", str(out)]
+    if label:
+        cmd += ["--label", label]
+    try:
+        proc = _run_exporter(cmd)
+    except Exception as e:  # timeout, interpreter missing — never a traceback to the agent
+        raise ToolError(f"atlas export did not run: {type(e).__name__}: {e}")
+    if proc.returncode != 0:
+        tail = (proc.stderr or proc.stdout or "").strip().splitlines()[-3:]
+        raise ToolError("atlas export failed: " + (" | ".join(tail) if tail else "no output"))
+
+    report: dict = {}
+    report_path = out / "export-report.json"
+    if report_path.is_file():
+        try:
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+        except ValueError:
+            report = {"unreadable": str(report_path)}
+
+    url = _serve_dir(out, port)
+    if open_browser:
+        import webbrowser
+
+        try:
+            webbrowser.open(url)
+        except Exception:  # headless host; the URL is still returned
+            pass
+    return json.dumps({"url": url, "out_dir": str(out), "store": str(store), "report": report})

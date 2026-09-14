@@ -36,6 +36,9 @@ CORE_TOOLS = {
 FULL_TOOLS = CORE_TOOLS | {
     "temporal", "category", "personality", "trigger", "stats",
     "conversation", "task", "gaps", "skill",
+    # v0.24.0: `atlas` exports this store's Memory Atlas (a static page) and
+    # serves it on 127.0.0.1; read-only, embedded mode only, full profile.
+    "atlas",
     # v0.11.0: registers only when the ENGINE carries the pack substrate
     # (feature-probed). Guarded below so this suite stays green on a v0.10
     # engine, where the tool is deliberately absent rather than broken.
@@ -113,7 +116,12 @@ FULL_TOOLS = CORE_TOOLS | {
 #     py3.10/3.12 (note 2 above), the rest is the one sentence that tells
 #     an agent WHY to set it (an older fact becomes a predecessor, not a
 #     contradiction) — without that sentence the parameter is never used.
-SCHEMA_BUDGET_CHARS = 49_700
+# 49_700 -> 51_000 on the v0.24.0 branch (REVIEWED): the `atlas` tool adds
+# ~1,300 chars (after trimming its description) for the Memory Atlas export;
+# the previous total sat 100 chars under the budget on the CI SDK, so any
+# addition needed a raise. Measured on the CI matrix, not locally: the CI
+# SDK renders the same schema ~4% larger than the local one.
+SCHEMA_BUDGET_CHARS = 51_000
 
 
 def _rpc(proc, method, params, mid):
