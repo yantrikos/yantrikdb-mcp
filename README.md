@@ -25,7 +25,7 @@ Works with Claude Code, Cursor, Windsurf, [Hermes Agent](docs/hermes.md), [Prime
 | **Works with** | Claude Code, Cursor, Windsurf, Continue, Claude Desktop, [Hermes Agent](docs/hermes.md), [Prime Agent](docs/prime-agent.md), any MCP client |
 | **Storage** | Local SQLite at `~/.yantrikdb/memory.db` (or any path; or HTTP cluster) |
 | **Embedder** | Bundled 64-dim Rust embedder (default), 384-dim ONNX MiniLM (`[onnx]` extra), 256-dim multilingual (101 languages) |
-| **Tools** | 19 — remember, recall, forget, correct, think, memory, graph, conflict, trigger, session, temporal, procedure, category, personality, stats, skill, gaps, conversation, task |
+| **Tools** | 20 — remember, recall, forget, correct, think, memory, graph, conflict, trigger, session, temporal, procedure, category, personality, stats, skill, gaps, conversation, task, atlas |
 | **License** | MIT (engine: Apache-2.0) |
 | **Privacy** | All data on your machine. No telemetry. No external services. |
 
@@ -188,7 +188,7 @@ The server injects a golden-path playbook into the agent's system prompt. Since 
 
 ## Tools
 
-19 tools, full engine coverage (`gaps`, `conversation`, `task` added in v0.9.0):
+20 tools, full engine coverage (`gaps`, `conversation`, `task` added in v0.9.0; `atlas` added in v0.24.0):
 
 | Tool | Actions | Purpose |
 |---|---|---|
@@ -211,6 +211,7 @@ The server injects a golden-path playbook into the agent's system prompt. Since 
 | `gaps` | — | **v0.9.0** — surface frequently-asked, poorly-answered queries (substrate's known unknowns) |
 | `conversation` | record / recent / clear | **v0.9.0** — bounded encrypted ring buffer for verbatim conversation turns, namespace-isolated |
 | `task` | add / get / list / update / delete | **v0.9.0** — substrate-backed task / chore store; survives sessions, surfaces in `session(action="digest")` |
+| `atlas` | export / status | **v0.24.0** — export this store's Memory Atlas (every memory, entity links, claims, revision history, tasks) as a static page and serve it on localhost; read-only, embedded mode only |
 
 Plus new actions on existing tools in v0.9.0:
 - `session(action="digest")` — one-call boot-time briefing (narrative chain head + open decisions + conflicts + triggers)
@@ -331,7 +332,7 @@ Outcomes are append-only events in the `outcome_substrate` namespace — no auto
 
 ### What is YantrikDB MCP?
 
-YantrikDB MCP is a Model Context Protocol (MCP) server that gives AI agents persistent cognitive memory across sessions. It exposes 16 tools (remember, recall, forget, correct, think, graph, conflict, trigger, session, temporal, procedure, category, personality, stats, memory, skill) that any MCP-compatible client — Claude Code, Cursor, Windsurf, Continue, Claude Desktop — can call automatically without prompting.
+YantrikDB MCP is a Model Context Protocol (MCP) server that gives AI agents persistent cognitive memory across sessions. It exposes 20 tools (remember, recall, forget, correct, think, graph, conflict, trigger, session, temporal, procedure, category, personality, stats, memory, skill, gaps, conversation, task, atlas) that any MCP-compatible client — Claude Code, Cursor, Windsurf, Continue, Claude Desktop — can call automatically without prompting.
 
 ### How is this different from file-based memory like CLAUDE.md?
 

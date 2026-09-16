@@ -57,7 +57,7 @@ cluster-client mode and it will then fail without a reachable cluster.
 ## Step 3 — verify
 
 Restart the client and confirm the server connects and lists its tools
-(`remember`, `recall`, `think`, `graph`, `session`, … — 20 tools on v0.19.x).
+(`remember`, `recall`, `think`, `graph`, `session`, … — 20 tools on v0.24.0+).
 Then call `remember` once with a short fact and `recall` with a short query
 describing it; the fact should come back.
 
