@@ -150,3 +150,35 @@ def test_server_json_version_matches_the_package() -> None:
             f"server.json packages[{pkg.get('identifier')!r}] version "
             f"{pkg['version']!r} != pyproject {expected!r}"
         )
+
+
+def test_plugin_manifest_version_matches_the_package() -> None:
+    """plugin.json is the Agent Plugin manifest the Cursor marketplace and the
+    Grok Build catalog read. It is a third version surface, and the two we
+    already have both drifted before anything compared them: server.json went
+    five minor releases stale, and the unreleased .mcpb manifest still says
+    0.4.6. Same guard, same reason.
+    """
+    root = pathlib.Path(__file__).resolve().parents[1]
+    pyproject = (root / "pyproject.toml").read_text(encoding="utf-8")
+    expected = re.search(r'^version = "([^"]+)"', pyproject, re.M).group(1)
+
+    manifest = json.loads((root / "plugin.json").read_text(encoding="utf-8"))
+    assert manifest["version"] == expected, (
+        f"plugin.json version {manifest['version']!r} != pyproject "
+        f"{expected!r}; the marketplace listing would advertise the wrong release"
+    )
+    assert re.fullmatch(r"[a-z0-9]([a-z0-9.-]*[a-z0-9])?", manifest["name"]), (
+        f"plugin.json name {manifest['name']!r} is not the lowercase kebab-case "
+        "the marketplaces require"
+    )
+    assert (root / manifest["logo"]).is_file(), "plugin.json logo path does not exist"
+    assert (root / "skills").is_dir(), (
+        "plugin.json relies on skills/ auto-discovery; the directory must exist"
+    )
+    mcp = json.loads((root / "mcp.json").read_text(encoding="utf-8"))
+    command = mcp["mcpServers"]["yantrikdb"]["command"]
+    assert command == "uvx", (
+        f"mcp.json command is {command!r}; a marketplace install has no pip step, "
+        "so the packaged config must be runnable without one"
+    )

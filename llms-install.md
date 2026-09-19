@@ -32,6 +32,10 @@ If `yantrikdb-mcp` is not on PATH, use `python -m yantrikdb_mcp` everywhere
 below instead of the bare command, or install with `pipx install yantrikdb-mcp`
 and use the pipx shim.
 
+If the machine has [uv](https://docs.astral.sh/uv/), you can skip the install
+entirely and use `"command": "uvx", "args": ["yantrikdb-mcp"]` in the config
+below — that is what the packaged `mcp.json` ships.
+
 ## Step 2 — add the server to the MCP config
 
 Use the default (local) mode. It needs no environment variables:

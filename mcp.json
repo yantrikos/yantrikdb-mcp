@@ -1,8 +1,8 @@
 {
   "mcpServers": {
     "yantrikdb": {
-      "command": "yantrikdb-mcp",
-      "args": []
+      "command": "uvx",
+      "args": ["yantrikdb-mcp"]
     }
   }
 }
