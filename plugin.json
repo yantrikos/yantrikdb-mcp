@@ -1,0 +1,22 @@
+{
+  "name": "yantrikdb",
+  "version": "0.24.0",
+  "description": "Cognitive memory for AI agents — semantic recall, a knowledge graph, contradiction detection and procedural learning. Local-first: one SQLite file, no account, no telemetry.",
+  "author": {
+    "name": "Yantrikos",
+    "email": "developer@pranab.co.in"
+  },
+  "homepage": "https://yantrikdb.com",
+  "repository": "https://github.com/yantrikos/yantrikdb-mcp",
+  "license": "MIT",
+  "keywords": [
+    "memory",
+    "mcp",
+    "agent-memory",
+    "knowledge-graph",
+    "semantic-search",
+    "contradiction-detection",
+    "yantrikdb"
+  ],
+  "logo": "icon.png"
+}

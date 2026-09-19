@@ -58,11 +58,17 @@ The MCP server runs the engine in-process with a local SQLite database. Fast, pr
 {
   "mcpServers": {
     "yantrikdb": {
-      "command": "yantrikdb-mcp"
+      "command": "uvx",
+      "args": ["yantrikdb-mcp"]
     }
   }
 }
 ```
+
+`uvx` fetches and runs the server on demand, so this works with no install step
+(it needs [uv](https://docs.astral.sh/uv/) on PATH). If you installed the
+package yourself with pip or pipx, `"command": "yantrikdb-mcp"` with no `args`
+is equivalent.
 
 That's it. The agent auto-recalls context, auto-remembers decisions, and auto-detects contradictions — no prompting needed.
 
@@ -76,7 +82,8 @@ Benefits: shared memory across machines, high availability, no local embedder do
 {
   "mcpServers": {
     "yantrikdb": {
-      "command": "yantrikdb-mcp",
+      "command": "uvx",
+      "args": ["yantrikdb-mcp"],
       "env": {
         "YANTRIKDB_SERVER_URL": "http://node1:7438,http://node2:7438",
         "YANTRIKDB_TOKEN": "ydb_your_database_token"
