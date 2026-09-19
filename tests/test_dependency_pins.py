@@ -182,3 +182,31 @@ def test_plugin_manifest_version_matches_the_package() -> None:
         f"mcp.json command is {command!r}; a marketplace install has no pip step, "
         "so the packaged config must be runnable without one"
     )
+
+
+def test_committed_mcp_json_declares_only_this_server() -> None:
+    """`.mcp.json` is tracked because Grok Build reads a plugin's MCP servers
+    from it. It was ignored until then, after a local dev copy holding live API
+    keys was swept in by `git add -A` on 2026-08-26 and stopped only by GitHub
+    push protection. Tracking it removes that ignore rule, so this test is the
+    replacement guard: the committed file declares this server and nothing else,
+    and carries no credentials.
+    """
+    root = pathlib.Path(__file__).resolve().parents[1]
+    committed = json.loads((root / ".mcp.json").read_text(encoding="utf-8"))
+    servers = committed["mcpServers"]
+    assert set(servers) == {"yantrikdb"}, (
+        f"committed .mcp.json declares {sorted(servers)}; it must declare only "
+        "'yantrikdb'. A local dev config belongs in .mcp.local.json or in "
+        "`claude mcp add-json ... -s local`, never here"
+    )
+    entry = servers["yantrikdb"]
+    assert "env" not in entry, (
+        "committed .mcp.json carries an env block; credentials must not live in "
+        "a tracked file (cluster users set YANTRIKDB_SERVER_URL/TOKEN themselves)"
+    )
+    plugin_cfg = json.loads((root / "mcp.json").read_text(encoding="utf-8"))
+    assert entry == plugin_cfg["mcpServers"]["yantrikdb"], (
+        ".mcp.json and mcp.json describe the same server to different hosts "
+        "(Grok reads the dotfile, Cursor reads mcp.json) and have drifted apart"
+    )
