@@ -10,11 +10,16 @@ dist/
 build/
 
 # ── Local config that carries credentials ────────────────────────────
-# `.mcp.json` holds live API keys. It was swept into a commit here by a
-# careless `git add -A` on 2026-08-26 and only GitHub's push protection
-# stopped it from being published. The core and server repos had already
-# ignored it; this one had not.
-.mcp.json
+# `.mcp.json` USED to be ignored: a local dev copy holding live API keys was
+# swept into a commit here by a careless `git add -A` on 2026-08-26, and only
+# GitHub's push protection stopped it from being published. It is now tracked,
+# because Grok Build reads a plugin's MCP servers from `.mcp.json` and the
+# marketplace installs this repo directly. The ignore rule could not protect it
+# anyway once tracked, so the guard moved into the test suite:
+# test_committed_mcp_json_declares_only_this_server fails if anything but the
+# yantrikdb entry appears there, or if it grows an `env` block.
+# Put local dev servers in `.mcp.local.json`, or register them with
+# `claude mcp add-json <name> <json> -s local`, which keeps them out of the repo.
 .mcp.local.json
 .env
 .env.*
