@@ -372,7 +372,7 @@ Skill writes are off by default precisely because they can shape future agent be
 
 ### Does it work in production?
 
-Yes — yantrikdb-mcp runs in production on the YantrikDB homelab cluster (1973+ memories, SSE transport, 2 weeks uptime per release cycle) and is the reference deployment behind the engine's release decisions. v0.8.x added the engine's same-day-patch cadence to the MCP server itself: external issues filed by community contributors land as released fixes within 2 hours.
+Yes — yantrikdb-mcp runs in production on the YantrikDB homelab cluster (1973+ memories, SSE transport, 2 weeks uptime per release cycle) and is the reference deployment behind the engine's release decisions. v0.8.x added the engine's same-day-patch cadence to the MCP server itself: the 3 community-filed issues to date were fixed in roughly 4 hours, 5 hours, and 4 days — a median of about 5 hours, same-day in 2 of 3 cases.
 
 ### What's the engine written in?
 
@@ -397,7 +397,7 @@ The YantrikDB engine is Rust ([crates.io: yantrikdb](https://crates.io/crates/ya
 | Storage | local SQLite + WAL | hosted | local | local + hosted | filesystem |
 | License | MIT (engine Apache-2.0) | Apache 2.0 | Apache 2.0 | Apache 2.0 | MIT |
 | Peer-reviewed paper | ✅ [Zenodo](https://doi.org/10.5281/zenodo.20128887) | ❌ | ✅ MemGPT paper | ❌ | ❌ |
-| Same-day patch cadence for issues | ✅ (avg <2h on v0.8.x) | varies | varies | varies | n/a |
+| Same-day patch cadence for issues | ✅ (4–5h on the 2 v0.8.x issues) | varies | varies | varies | n/a |
 
 Comparisons reflect public-facing capabilities as of May 2026. PRs welcome to correct any rows.
 
