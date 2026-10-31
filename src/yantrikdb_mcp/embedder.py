@@ -21,6 +21,16 @@ Selection is automatic ("auto" — the default):
     incompatible with existing DBs).
 
 Override with `YANTRIKDB_EMBEDDER=auto|bundled|onnx|multilingual`.
+
+4. **Named registry embedder** (opt-in) — `YANTRIKDB_EMBEDDER=named:<model>`
+   selects any model from the engine's downloadable registry
+   (`potion-base-8M` 256-dim, `potion-base-32M` 512-dim,
+   `potion-multilingual-128M` 256-dim). The dimension is taken from the
+   built-in registry table; set `YANTRIKDB_EMBEDDING_DIM` to override for
+   registry entries this table doesn't know yet. Like `multilingual`,
+   a named embedder is only valid for a fresh database (a store's
+   dimension is fixed at creation), so it is blocked early on a DB that
+   already has memories.
 """
 
 import logging
@@ -209,6 +219,17 @@ def _onnx_deps_available() -> bool:
 MULTILINGUAL_MODEL = "potion-multilingual-128M"
 MULTILINGUAL_DIM = 256
 
+# Output dims for the engine's downloadable embedder registry. The engine
+# itself knows these too, but the store's embedding_dim must be passed at
+# YantrikDB() construction — before the named embedder is attached — so the
+# loader needs the dim locally. YANTRIKDB_EMBEDDING_DIM overrides for
+# registry entries added after this table was written.
+NAMED_EMBEDDER_DIMS = {
+    "potion-base-8M": 256,
+    "potion-base-32M": 512,
+    "potion-multilingual-128M": 256,
+}
+
 
 def load_engine(db_path: str | os.PathLike, model_name: str = "all-MiniLM-L6-v2"):
     """Open a YantrikDB engine with the right embedder for this install.
@@ -228,11 +249,65 @@ def load_engine(db_path: str | os.PathLike, model_name: str = "all-MiniLM-L6-v2"
     from yantrikdb import YantrikDB
 
     choice = os.environ.get("YANTRIKDB_EMBEDDER", "auto").strip().lower()
+
+    has_data = db_has_memories(db_path)
+
+    # Named registry embedder: "named:<model>" (e.g. potion-base-32M).
+    # Checked before the keyword whitelist so registry names that could
+    # never collide with a keyword still route here. Model names are
+    # case-sensitive (potion-base-32M), so extract from the raw env value,
+    # not the lowercased `choice`.
+    if choice.startswith("named:"):
+        raw = os.environ.get("YANTRIKDB_EMBEDDER", "")
+        model = raw[len("named:") :].strip()
+        # Canonicalise case against the dim table (e.g. potion-base-8m →
+        # potion-base-8M) so set_embedder_named gets the registry's spelling.
+        canonical = next(
+            (k for k in NAMED_EMBEDDER_DIMS if k.lower() == model.lower()), model
+        )
+        model = canonical
+        if not model:
+            raise RuntimeError(
+                "YANTRIKDB_EMBEDDER=named:<model> requires a model name; "
+                f"known: {', '.join(sorted(NAMED_EMBEDDER_DIMS))}"
+            )
+        dim = int(os.environ.get("YANTRIKDB_EMBEDDING_DIM", 0)) or NAMED_EMBEDDER_DIMS.get(model)
+        if not dim:
+            raise RuntimeError(
+                f"Unknown output dim for embedder {model!r}; set "
+                f"YANTRIKDB_EMBEDDING_DIM to the model's vector dimension. "
+                f"Models with a built-in dim: {', '.join(sorted(NAMED_EMBEDDER_DIMS))}"
+            )
+        if not hasattr(YantrikDB, "with_default") or not hasattr(YantrikDB, "set_embedder_named"):
+            raise RuntimeError(
+                f"Named embedder {model!r} requires yantrikdb engine >=0.7.9 "
+                "(with set_embedder_named + with_default). "
+                "Run: pip install --upgrade 'yantrikdb-mcp[onnx]' to refresh "
+                "the engine, or unset YANTRIKDB_EMBEDDER to fall back to auto."
+            )
+        if has_data:
+            raise RuntimeError(
+                f"YANTRIKDB_EMBEDDER={choice} requested but the existing "
+                f"database at {db_path} contains memories from a different "
+                f"embedder (a store's vector dim is fixed at creation, so "
+                f"{model} at {dim} dim cannot adopt it). Either point "
+                f"YANTRIKDB_DB_PATH at a new file, or unset YANTRIKDB_EMBEDDER "
+                f"to use the back-compat backend for this DB."
+            )
+        t0 = time.time()
+        # Construct at the target dim, then attach — same supported swap
+        # path as the multilingual branch (with_default would pin dim=64).
+        db = YantrikDB(db_path=str(db_path), embedding_dim=dim)
+        db.set_embedder_named(model)
+        log.info(
+            "YantrikDB opened with named embedder (%s, %d dim) in %.2fs",
+            model, dim, time.time() - t0,
+        )
+        return db
+
     if choice not in ("auto", "bundled", "onnx", "multilingual"):
         log.warning("Unknown YANTRIKDB_EMBEDDER=%r, treating as 'auto'", choice)
         choice = "auto"
-
-    has_data = db_has_memories(db_path)
 
     # Resolve auto → bundled / onnx
     if choice == "auto":
