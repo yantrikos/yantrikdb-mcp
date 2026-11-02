@@ -133,3 +133,11 @@ jobs:
           # for non-multilingual runs).
           YANTRIKDB_TEST_MULTILINGUAL: ${{ matrix.backend == 'multilingual' && '1' || '0' }}
         run: pytest -q tests/test_e2e_mcp.py
+
+      # The unit job never downloads this model, and the e2e suite never reopens
+      # a store, so a store that could not survive a restart passed both.
+      - name: Multilingual store survives a restart
+        if: matrix.backend == 'multilingual'
+        env:
+          YANTRIKDB_TEST_MULTILINGUAL: '1'
+        run: pytest -q tests/test_embedder_loader.py -k multilingual_store_survives_restart
