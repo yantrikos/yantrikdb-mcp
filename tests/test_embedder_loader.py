@@ -167,6 +167,87 @@ def test_auto_never_picks_multilingual(tmp_path: Path, monkeypatch, caplog):
 
 
 # ─────────────────────────────────────────────────────────────────────
+# Named registry embedders (named:<model>)
+# ─────────────────────────────────────────────────────────────────────
+
+
+@pytest.fixture
+def no_model_download(monkeypatch):
+    """Stub set_embedder_named so tests never hit the network."""
+    import yantrikdb as ydb_mod
+
+    calls: list[str] = []
+    monkeypatch.setattr(
+        ydb_mod.YantrikDB,
+        "set_embedder_named",
+        lambda self, name: calls.append(name),
+    )
+    return calls
+
+
+def test_named_opens_fresh_db_at_registry_dim(tmp_path: Path, monkeypatch, no_model_download):
+    """named:potion-base-32M on a fresh DB must construct at 512 dim and
+    attach the named embedder (no download in the test — stubbed)."""
+    import yantrikdb as ydb_mod
+
+    monkeypatch.setenv("YANTRIKDB_EMBEDDER", "named:potion-base-32M")
+    db = embedder_mod.load_engine(tmp_path / "fresh512.db")
+    assert no_model_download == ["potion-base-32M"]
+    assert isinstance(db, ydb_mod.YantrikDB)
+    del db
+
+
+def test_named_blocks_existing_db(tmp_path: Path, monkeypatch, no_model_download):
+    """Forcing a named embedder on a DB that already has memories must fail
+    loudly — its vectors are at a different dim and recall would silently
+    produce zero results."""
+    from yantrikdb import YantrikDB
+
+    db_path = tmp_path / "existing.db"
+    db = YantrikDB.with_default(str(db_path))
+    db.record_text("existing 64-dim memory")
+    del db
+
+    monkeypatch.setenv("YANTRIKDB_EMBEDDER", "named:potion-base-8M")
+    with pytest.raises(RuntimeError) as exc:
+        embedder_mod.load_engine(db_path)
+    msg = str(exc.value)
+    assert "potion-base-8M" in msg
+    assert "fixed at creation" in msg
+
+
+def test_named_unknown_dim_requires_env_override(tmp_path: Path, monkeypatch, no_model_download):
+    """A registry name missing from the dim table needs YANTRIKDB_EMBEDDING_DIM."""
+    monkeypatch.setenv("YANTRIKDB_EMBEDDER", "named:potion-base-99X")
+    monkeypatch.delenv("YANTRIKDB_EMBEDDING_DIM", raising=False)
+    with pytest.raises(RuntimeError) as exc:
+        embedder_mod.load_engine(tmp_path / "unknowndim.db")
+    assert "YANTRIKDB_EMBEDDING_DIM" in str(exc.value)
+
+
+def test_named_env_dim_override(tmp_path: Path, monkeypatch, no_model_download):
+    """YANTRIKDB_EMBEDDING_DIM supplies the dim for unknown registry names."""
+    monkeypatch.setenv("YANTRIKDB_EMBEDDER", "named:potion-base-99X")
+    monkeypatch.setenv("YANTRIKDB_EMBEDDING_DIM", "768")
+    db = embedder_mod.load_engine(tmp_path / "override768.db")
+    assert no_model_download == ["potion-base-99X"]
+    del db
+
+
+def test_named_requires_engine_with_set_embedder_named(tmp_path: Path, monkeypatch):
+    """Older engines without set_embedder_named must fail with a clear upgrade hint."""
+    import yantrikdb as ydb_mod
+
+    monkeypatch.delattr(ydb_mod.YantrikDB, "set_embedder_named", raising=False)
+    monkeypatch.setenv("YANTRIKDB_EMBEDDER", "named:potion-base-32M")
+
+    with pytest.raises(RuntimeError) as exc:
+        embedder_mod.load_engine(tmp_path / "needs_new_engine.db")
+    msg = str(exc.value)
+    assert "yantrikdb engine >=0.7" in msg or "set_embedder_named" in msg
+
+
+# ─────────────────────────────────────────────────────────────────────
 # Backwards-compat shim
 # ─────────────────────────────────────────────────────────────────────
 
