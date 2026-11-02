@@ -153,9 +153,9 @@ Local mode ships three embedders. The MCP picks one automatically; override with
 | `bundled` (engine default) | 64 | ~80 ms | ~10 MB | English-only | New / empty databases (auto-selected) |
 | `onnx` (MiniLM-L6-v2) | 384 | ~2 s | ~150 MB | English (higher recall) | Existing pre-v0.6 databases (auto-selected), or when set explicitly |
 | `multilingual` (potion-multilingual-128M) | 256 | ~2 s + ~460 MB download on first use | ~10 MB pip + ~500 MB model cache | 101 languages (BGE-M3 tokenizer) | Opt-in only via `YANTRIKDB_EMBEDDER=multilingual` |
-| `named:<model>` (any registry model, e.g. `named:potion-base-32M`) | per model | ~2 s + download on first use | ~10 MB pip + model cache | per model | Opt-in only via `YANTRIKDB_EMBEDDER=named:<model>` on a **fresh** database |
+| `named:<model>` (any registry model, e.g. `named:potion-base-32M`) | per model | ~2 s + download on first use | ~10 MB pip + model cache | per model | Opt-in only via `YANTRIKDB_EMBEDDER=named:<model>`, starting from a **fresh** database |
 
-**`auto`** (default) reads the SQLite file at `YANTRIKDB_DB_PATH` and picks `onnx` if it already contains memories — preserving recall quality on upgrades — and `bundled` otherwise. **Multilingual is never auto-selected** because its 256-dim vectors are incompatible with existing bundled (64-dim) or ONNX (384-dim) databases; opt-in only on fresh databases.
+**`auto`** (default) reads the SQLite file at `YANTRIKDB_DB_PATH` and picks `onnx` if it already contains memories — preserving recall quality on upgrades — and `bundled` otherwise. **Multilingual is never auto-selected** because its 256-dim vectors are incompatible with existing bundled (64-dim) or ONNX (384-dim) databases. Opt in on a fresh database and keep the setting; that database then reopens normally.
 
 Set `YANTRIKDB_EMBEDDER=bundled|onnx|multilingual|named:<model>` to override. If you set `YANTRIKDB_EMBEDDER=onnx` (or auto-detection picks it) without installing the extras, the server fails fast with an install hint:
 
@@ -167,7 +167,7 @@ model, but ONNX deps are missing.
 
 For the multilingual backend, the engine downloads `potion-multilingual-128M` (~460 MB tarball) from `github.com/yantrikos/yantrikdb-models` on first use. The download is SHA-256 verified, extracted into the engine's cache dir, and reused on subsequent starts. No extra Python deps required — the model runs entirely inside the Rust engine.
 
-The `named:<model>` form selects any model from the same downloadable registry — currently `potion-base-8M` (256-dim, ~92% MiniLM quality) and `potion-base-32M` (512-dim, ~95% MiniLM quality), which the fixed keyword set can't reach. The loader knows the registry's output dims; for a registry entry it doesn't know yet, set `YANTRIKDB_EMBEDDING_DIM` to the model's dim. Like `multilingual`, `named:` is only valid on a **fresh** database (a store's dimension is fixed at creation) — pointing it at a database that already has memories fails fast instead of silently breaking recall. To move an existing store to a different dim, create a new `YANTRIKDB_DB_PATH` and replay/export the records.
+The `named:<model>` form selects any model from the same downloadable registry — currently `potion-base-8M` (256-dim, ~92% MiniLM quality) and `potion-base-32M` (512-dim, ~95% MiniLM quality), which the fixed keyword set can't reach. The loader knows the registry's output dims; for a registry entry it doesn't know yet, set `YANTRIKDB_EMBEDDING_DIM` to the model's dim. `multilingual` and `named:<model>` create a fresh database on that model and reopen a database the same model built. A database with memories from anything else fails fast instead of silently breaking recall, and the error names the embedder that built it when that's recorded. To move an existing store to a different embedder, create a new `YANTRIKDB_DB_PATH` and replay/export the records.
 
 ## Why Not File-Based Memory?
 

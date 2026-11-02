@@ -197,23 +197,110 @@ def test_named_opens_fresh_db_at_registry_dim(tmp_path: Path, monkeypatch, no_mo
     del db
 
 
-def test_named_blocks_existing_db(tmp_path: Path, monkeypatch, no_model_download):
-    """Forcing a named embedder on a DB that already has memories must fail
-    loudly — its vectors are at a different dim and recall would silently
-    produce zero results."""
+def _store_with_foreign_vectors(db_path: Path, dim: int) -> None:
+    """A store with memories and no recorded embedder: vectors from the caller."""
     from yantrikdb import YantrikDB
 
-    db_path = tmp_path / "existing.db"
-    db = YantrikDB.with_default(str(db_path))
-    db.record_text("existing 64-dim memory")
+    db = YantrikDB(db_path=str(db_path), embedding_dim=dim)
+    db.record("vectors from somewhere else", embedding=[1.0] + [0.0] * (dim - 1))
+    db.close()
     del db
+
+
+def test_named_refuses_store_with_no_recorded_embedder(
+    tmp_path: Path, monkeypatch, no_model_download
+):
+    """Same dim and no identity: the engine would attach and stamp a false
+    identity on vectors it never produced, so the loader has to refuse."""
+    db_path = tmp_path / "foreign.db"
+    _store_with_foreign_vectors(db_path, 256)
 
     monkeypatch.setenv("YANTRIKDB_EMBEDDER", "named:potion-base-8M")
     with pytest.raises(RuntimeError) as exc:
         embedder_mod.load_engine(db_path)
-    msg = str(exc.value)
-    assert "potion-base-8M" in msg
-    assert "fixed at creation" in msg
+    assert "potion-base-8M" in str(exc.value)
+    assert "different embedder" in str(exc.value)
+    assert no_model_download == [], "must refuse before attaching"
+
+
+def test_named_refuses_store_of_another_model_and_names_it(
+    tmp_path: Path, monkeypatch, no_model_download
+):
+    """The error has to say what built the store, and how to reopen it."""
+    import yantrikdb as ydb_mod
+
+    db_path = tmp_path / "other.db"
+    _store_with_foreign_vectors(db_path, 512)
+    monkeypatch.setattr(
+        ydb_mod.YantrikDB,
+        "embedder_identity",
+        lambda self: {"name": "potion-base-8M", "digest": "sha256:x", "dim": 512},
+    )
+
+    monkeypatch.setenv("YANTRIKDB_EMBEDDER", "named:potion-base-32M")
+    with pytest.raises(RuntimeError) as exc:
+        embedder_mod.load_engine(db_path)
+    assert "named:potion-base-8M" in str(exc.value)
+    assert no_model_download == []
+
+
+def test_refused_without_identity_api_on_older_engines(
+    tmp_path: Path, monkeypatch, no_model_download
+):
+    """The supported engine range predates embedder_identity. Nothing can be
+    verified there, so a store with memories stays refused."""
+    import yantrikdb as ydb_mod
+
+    db_path = tmp_path / "old.db"
+    _store_with_foreign_vectors(db_path, 256)
+    monkeypatch.delattr(ydb_mod.YantrikDB, "embedder_identity", raising=False)
+
+    monkeypatch.setenv("YANTRIKDB_EMBEDDER", "named:potion-base-8M")
+    with pytest.raises(RuntimeError):
+        embedder_mod.load_engine(db_path)
+    assert no_model_download == []
+
+
+def _restart_and_recall(db_path: Path) -> list[str]:
+    """Two server starts on one file, with the real engine and no stubs."""
+    db = embedder_mod.load_engine(db_path)
+    db.record_text("the deploy key for node4 is id_deploy")
+    db.close()
+    del db
+
+    db = embedder_mod.load_engine(db_path)
+    try:
+        return [hit["text"] for hit in db.recall(query="deploy key", top_k=1)]
+    finally:
+        db.close()
+
+
+def _skip_unless_downloadable(exc: Exception, model: str) -> None:
+    msg = str(exc).lower()
+    if any(k in msg for k in ("download", "fetch", "network", "connect", "timed out")):
+        pytest.skip(f"{model} unavailable: {exc}")
+
+
+def test_named_store_survives_restart(tmp_path: Path, monkeypatch):
+    """The store a named embedder created has to reopen on the next start. The
+    first start writes memories, so a check on "has memories" alone refuses it."""
+    monkeypatch.setenv("YANTRIKDB_EMBEDDER", "named:potion-base-8M")
+    try:
+        hits = _restart_and_recall(tmp_path / "restart.db")
+    except RuntimeError as exc:
+        _skip_unless_downloadable(exc, "potion-base-8M")
+        raise
+    assert hits == ["the deploy key for node4 is id_deploy"]
+
+
+@pytest.mark.skipif(
+    os.environ.get("YANTRIKDB_TEST_MULTILINGUAL") != "1",
+    reason="downloads ~460 MB; CI opts in on the multilingual backend job",
+)
+def test_multilingual_store_survives_restart(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("YANTRIKDB_EMBEDDER", "multilingual")
+    hits = _restart_and_recall(tmp_path / "restart.db")
+    assert hits == ["the deploy key for node4 is id_deploy"]
 
 
 def test_named_unknown_dim_requires_env_override(tmp_path: Path, monkeypatch, no_model_download):

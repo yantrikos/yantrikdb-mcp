@@ -27,10 +27,11 @@ Override with `YANTRIKDB_EMBEDDER=auto|bundled|onnx|multilingual`.
    (`potion-base-8M` 256-dim, `potion-base-32M` 512-dim,
    `potion-multilingual-128M` 256-dim). The dimension is taken from the
    built-in registry table; set `YANTRIKDB_EMBEDDING_DIM` to override for
-   registry entries this table doesn't know yet. Like `multilingual`,
-   a named embedder is only valid for a fresh database (a store's
-   dimension is fixed at creation), so it is blocked early on a DB that
-   already has memories.
+   registry entries this table doesn't know yet.
+
+`multilingual` and `named:<model>` create a fresh database on that model and
+reopen a database the same model built. A database with memories from anything
+else is refused: see `_open_registry_store`.
 """
 
 import logging
@@ -231,6 +232,46 @@ NAMED_EMBEDDER_DIMS = {
 }
 
 
+def _open_registry_store(YantrikDB, db_path, model: str, dim: int, has_data: bool, selector: str):
+    """Open or create a store on a downloadable registry embedder.
+
+    A store with memories opens only if its recorded embedder is this model.
+    The engine refuses a different model or dimension by itself, but a store with
+    no recorded identity at the same dimension (vectors supplied by the caller, or
+    written before identities existed) would attach silently and be stamped with
+    an identity its vectors never had, so that case has to be caught here.
+    `embedder_identity` is probed because the supported engine range predates it;
+    without it nothing can be verified, so the store is refused.
+    """
+    # Construct at the target dim, then attach: `with_default()` picks its own dim
+    # and the engine rejects `set_embedder_named` for a mismatched one. A refused
+    # open leaves the store intact.
+    db = YantrikDB(db_path=str(db_path), embedding_dim=dim)
+    if has_data:
+        identity = db.embedder_identity() if hasattr(db, "embedder_identity") else None
+        recorded = (identity or {}).get("name")
+        if recorded != model:
+            db.close()
+            if recorded:
+                remedy = (
+                    f"Set YANTRIKDB_EMBEDDER=named:{recorded} to keep using it, "
+                    "or point YANTRIKDB_DB_PATH at a new file."
+                )
+            else:
+                remedy = (
+                    "It has no recorded embedder, so it cannot be verified. Either point "
+                    "YANTRIKDB_DB_PATH at a new file, or unset YANTRIKDB_EMBEDDER to use "
+                    "the back-compat backend for this DB."
+                )
+            raise RuntimeError(
+                f"YANTRIKDB_EMBEDDER={selector} requested but the existing database at "
+                f"{db_path} contains memories from a different embedder "
+                f"({recorded or 'unknown'}), so {model} ({dim} dim) cannot read them. {remedy}"
+            )
+    db.set_embedder_named(model)
+    return db
+
+
 def load_engine(db_path: str | os.PathLike, model_name: str = "all-MiniLM-L6-v2"):
     """Open a YantrikDB engine with the right embedder for this install.
 
@@ -285,20 +326,8 @@ def load_engine(db_path: str | os.PathLike, model_name: str = "all-MiniLM-L6-v2"
                 "Run: pip install --upgrade 'yantrikdb-mcp[onnx]' to refresh "
                 "the engine, or unset YANTRIKDB_EMBEDDER to fall back to auto."
             )
-        if has_data:
-            raise RuntimeError(
-                f"YANTRIKDB_EMBEDDER={choice} requested but the existing "
-                f"database at {db_path} contains memories from a different "
-                f"embedder (a store's vector dim is fixed at creation, so "
-                f"{model} at {dim} dim cannot adopt it). Either point "
-                f"YANTRIKDB_DB_PATH at a new file, or unset YANTRIKDB_EMBEDDER "
-                f"to use the back-compat backend for this DB."
-            )
         t0 = time.time()
-        # Construct at the target dim, then attach — same supported swap
-        # path as the multilingual branch (with_default would pin dim=64).
-        db = YantrikDB(db_path=str(db_path), embedding_dim=dim)
-        db.set_embedder_named(model)
+        db = _open_registry_store(YantrikDB, db_path, model, dim, has_data, f"named:{model}")
         log.info(
             "YantrikDB opened with named embedder (%s, %d dim) in %.2fs",
             model, dim, time.time() - t0,
@@ -342,27 +371,10 @@ def load_engine(db_path: str | os.PathLike, model_name: str = "all-MiniLM-L6-v2"
                 "Run: pip install --upgrade 'yantrikdb-mcp[onnx]' to refresh "
                 "the engine, or unset YANTRIKDB_EMBEDDER to fall back to auto."
             )
-        # Opening an existing non-multilingual DB with this backend would
-        # silently produce zero-recall results because the stored vectors
-        # are at a different dim. Block it early with a helpful error.
-        if has_data:
-            raise RuntimeError(
-                f"YANTRIKDB_EMBEDDER=multilingual requested but the existing "
-                f"database at {db_path} contains memories from a different "
-                f"embedder (different vector dim).\n"
-                f"Multilingual ({MULTILINGUAL_DIM} dim) is only valid for "
-                f"fresh databases. Either point YANTRIKDB_DB_PATH at a new "
-                f"file, or unset YANTRIKDB_EMBEDDER to use the back-compat "
-                f"backend for this DB."
-            )
         t0 = time.time()
-        # Open at the multilingual model's dim explicitly — `with_default()`
-        # would pin dim=64 from the bundled embedder, and the engine
-        # rejects `set_embedder_named` for a mismatched dim. Constructing
-        # bare YantrikDB at dim=256 then attaching the named embedder is
-        # the supported swap path.
-        db = YantrikDB(db_path=str(db_path), embedding_dim=MULTILINGUAL_DIM)
-        db.set_embedder_named(MULTILINGUAL_MODEL)
+        db = _open_registry_store(
+            YantrikDB, db_path, MULTILINGUAL_MODEL, MULTILINGUAL_DIM, has_data, "multilingual"
+        )
         log.info(
             "YantrikDB opened with multilingual embedder (%s, %d dim) in %.2fs",
             MULTILINGUAL_MODEL, MULTILINGUAL_DIM, time.time() - t0,
