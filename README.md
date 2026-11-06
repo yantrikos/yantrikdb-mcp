@@ -45,6 +45,12 @@ pip install 'yantrikdb-mcp[onnx]'
 yantrikos/yantrikdb-mcp` then `/plugin install yantrikdb` — installs straight
 from this repo, no PyPI round-trip.
 
+
+**Using Cursor?** Import this repo directly — Cursor reads the same
+`.cursor-plugin/plugin.json` manifest: Customize -> Plugins -> Import from
+Repo, paste `yantrikos/yantrikdb-mcp` (teams: Dashboard -> Plugins & MCPs ->
+Add Marketplace -> Import from Repo instead). Not yet in Cursor's curated
+marketplace — this is the direct-import path, no review needed.
 > **Upgrading from v0.5.x?** Your existing database stays at 384 dim — install
 > the `[onnx]` extra to keep using it transparently. New installs default to
 > the lean bundled embedder. v0.7.0+ pins the engine migration fix automatically.
