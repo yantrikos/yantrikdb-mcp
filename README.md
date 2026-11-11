@@ -32,8 +32,8 @@ Works with Claude Code, Cursor, Windsurf, [Hermes Agent](docs/hermes.md), [Prime
 ## Install
 
 ```bash
-# Default — uses the engine's bundled 64-dim embedder. ~10 MB install,
-# ~80 ms cold start, no native ML deps.
+# Default — uses the engine's bundled 64-dim embedder. ~15-22 MB install
+# (varies by platform), ~80 ms cold start, no native ML deps.
 pip install yantrikdb-mcp
 
 # Optional: higher-quality 384-dim ONNX MiniLM-L6-v2 embedder (~150 MB install).
@@ -45,12 +45,12 @@ pip install 'yantrikdb-mcp[onnx]'
 yantrikos/yantrikdb-mcp` then `/plugin install yantrikdb` — installs straight
 from this repo, no PyPI round-trip.
 
-
 **Using Cursor?** Import this repo directly — Cursor reads the same
 `.cursor-plugin/plugin.json` manifest: Customize -> Plugins -> Import from
 Repo, paste `yantrikos/yantrikdb-mcp` (teams: Dashboard -> Plugins & MCPs ->
 Add Marketplace -> Import from Repo instead). Not yet in Cursor's curated
 marketplace — this is the direct-import path, no review needed.
+
 > **Upgrading from v0.5.x?** Your existing database stays at 384 dim — install
 > the `[onnx]` extra to keep using it transparently. New installs default to
 > the lean bundled embedder. v0.7.0+ pins the engine migration fix automatically.
@@ -156,10 +156,10 @@ Local mode ships three embedders. The MCP picks one automatically; override with
 
 | Backend | Dim | Cold start | Install size | Language coverage | When it's used |
 |---|---|---|---|---|---|
-| `bundled` (engine default) | 64 | ~80 ms | ~10 MB | English-only | New / empty databases (auto-selected) |
+| `bundled` (engine default) | 64 | ~80 ms | ~15-22 MB | English-only | New / empty databases (auto-selected) |
 | `onnx` (MiniLM-L6-v2) | 384 | ~2 s | ~150 MB | English (higher recall) | Existing pre-v0.6 databases (auto-selected), or when set explicitly |
-| `multilingual` (potion-multilingual-128M) | 256 | ~2 s + ~460 MB download on first use | ~10 MB pip + ~500 MB model cache | 101 languages (BGE-M3 tokenizer) | Opt-in only via `YANTRIKDB_EMBEDDER=multilingual` |
-| `named:<model>` (any registry model, e.g. `named:potion-base-32M`) | per model | ~2 s + download on first use | ~10 MB pip + model cache | per model | Opt-in only via `YANTRIKDB_EMBEDDER=named:<model>`, starting from a **fresh** database |
+| `multilingual` (potion-multilingual-128M) | 256 | ~2 s + ~460 MB download on first use | ~15-22 MB pip + ~500 MB model cache | 101 languages (BGE-M3 tokenizer) | Opt-in only via `YANTRIKDB_EMBEDDER=multilingual` |
+| `named:<model>` (any registry model, e.g. `named:potion-base-32M`) | per model | ~2 s + download on first use | ~15-22 MB pip + model cache | per model | Opt-in only via `YANTRIKDB_EMBEDDER=named:<model>`, starting from a **fresh** database |
 
 **`auto`** (default) reads the SQLite file at `YANTRIKDB_DB_PATH` and picks `onnx` if it already contains memories — preserving recall quality on upgrades — and `bundled` otherwise. **Multilingual is never auto-selected** because its 256-dim vectors are incompatible with existing bundled (64-dim) or ONNX (384-dim) databases. Opt in on a fresh database and keep the setting; that database then reopens normally.
 

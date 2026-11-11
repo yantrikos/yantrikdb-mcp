@@ -26,7 +26,7 @@ export YANTRIKDB_API_KEY=$(openssl rand -hex 16)
 yantrikdb-mcp --transport streamable-http --host 127.0.0.1 --port 8420
 ```
 
-~10 MB, bundled Rust embedder, no native ML dependencies. The bearer token
+~15-22 MB, bundled Rust embedder, no native ML dependencies. The bearer token
 is required for network transports — the server refuses to run open.
 
 ## 2. Declare the server

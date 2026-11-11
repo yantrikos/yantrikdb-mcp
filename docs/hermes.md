@@ -15,7 +15,7 @@ in a local SQLite file on your machine. No telemetry, no external services.
 pip install yantrikdb-mcp
 ```
 
-~10 MB, bundled Rust embedder, no native ML dependencies. (Optional
+~15-22 MB, bundled Rust embedder, no native ML dependencies. (Optional
 higher-quality embedder: `pip install 'yantrikdb-mcp[onnx]'`.)
 
 ## 2. Register it with Hermes
