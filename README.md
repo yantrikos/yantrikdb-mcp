@@ -9,6 +9,7 @@ Works with Claude Code, Cursor, Windsurf, [Hermes Agent](docs/hermes.md), [Prime
 [![PyPI downloads](https://img.shields.io/pypi/dm/yantrikdb-mcp)](https://pypi.org/project/yantrikdb-mcp/)
 [![Python](https://img.shields.io/pypi/pyversions/yantrikdb-mcp)](https://pypi.org/project/yantrikdb-mcp/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+[![yantrikos/yantrikdb-mcp MCP server](https://glama.ai/mcp/servers/yantrikos/yantrikdb-mcp/badges/score.svg)](https://glama.ai/mcp/servers/yantrikos/yantrikdb-mcp)
 
 **Website:** [yantrikdb.com](https://yantrikdb.com) · **Docs:** [yantrikdb.com/guides/mcp](https://yantrikdb.com/guides/mcp/) · **GitHub:** [yantrikos/yantrikdb-mcp](https://github.com/yantrikos/yantrikdb-mcp) · **Paper:** [Skill as Memory, Not Document](https://doi.org/10.5281/zenodo.20128887)
 
